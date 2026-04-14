@@ -295,7 +295,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await startSandbox(sbName, worktreePath, port);
         await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
       } catch (err: any) {
-        await updateBranch(id, { status: "error", error: err.message });
+        // Drop the placeholder record instead of leaving an empty "error"
+        // row behind — retries would otherwise accumulate duplicates.
+        await removeBranch(id).catch(() => {});
         return reply.code(500).send({ error: err.message });
       }
 
@@ -330,7 +332,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await startSandbox(sbName, worktreePath, port);
         await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
       } catch (err: any) {
-        await updateBranch(id, { status: "error", error: err.message });
+        await removeBranch(id).catch(() => {});
         return reply.code(500).send({ error: err.message });
       }
       return getBranch(id);

@@ -65,7 +65,7 @@ export function TerminalModal({ branch, kind, fullscreen, onFullscreenToggle, on
     const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
     const wsKind = kind === "logs" ? "dashboard" : kind;
     const ws = new WebSocket(
-      `${wsProto}://${window.location.host}/api/branches/${branch.id}/terminal?kind=${wsKind}`
+      `${wsProto}://${window.location.host}/api/branches/${encodeURIComponent(branch.id)}/terminal?kind=${wsKind}`
     );
 
     ws.onopen = () => {

@@ -40,6 +40,21 @@ export async function ensureRepo(): Promise<string> {
   throw new Error(`Repo not found at ${repo.repoPath}. Re-add the repo in settings.`);
 }
 
+async function worktreeAdd(repoPath: string, args: string[], branch: string): Promise<void> {
+  const res = await run("git", ["-C", repoPath, ...args]);
+  if (res.code === 0) return;
+  const combined = `${res.stdout}\n${res.stderr}`;
+  // "fatal: 'X' is already used by worktree at '/path/to/other'"
+  const m = combined.match(/is already (?:used|checked out) by worktree at '([^']+)'/);
+  if (m) {
+    const other = m[1];
+    throw new Error(
+      `Branch "${branch}" is already checked out at ${other}. Switch that checkout to a different branch, then try again.`
+    );
+  }
+  throw new Error(`git worktree add ${branch} failed (${res.code}): ${(res.stderr || res.stdout).trim()}`);
+}
+
 export async function createWorktree(folderName: string, branch: string, base?: string): Promise<string> {
   const repo = requireActiveRepo();
   await ensureRepo();
@@ -48,7 +63,7 @@ export async function createWorktree(folderName: string, branch: string, base?: 
 
   const localCheck = await run("git", ["-C", repo.repoPath, "rev-parse", "--verify", branch]);
   if (localCheck.code === 0) {
-    await runOrThrow("git", ["-C", repo.repoPath, "worktree", "add", worktreePath, branch]);
+    await worktreeAdd(repo.repoPath, ["worktree", "add", worktreePath, branch], branch);
     return worktreePath;
   }
 
@@ -61,22 +76,17 @@ export async function createWorktree(folderName: string, branch: string, base?: 
     `origin/${branch}`,
   ]);
   if (remoteCheck.code === 0) {
-    await runOrThrow("git", [
-      "-C",
+    await worktreeAdd(
       repo.repoPath,
-      "worktree",
-      "add",
-      "-B",
-      branch,
-      worktreePath,
-      `origin/${branch}`,
-    ]);
+      ["worktree", "add", "-B", branch, worktreePath, `origin/${branch}`],
+      branch
+    );
     return worktreePath;
   }
 
-  const args = ["-C", repo.repoPath, "worktree", "add", "-b", branch, worktreePath];
+  const args = ["worktree", "add", "-b", branch, worktreePath];
   if (base) args.push(base);
-  await runOrThrow("git", args);
+  await worktreeAdd(repo.repoPath, args, branch);
   return worktreePath;
 }
 

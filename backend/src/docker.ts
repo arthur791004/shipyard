@@ -225,7 +225,10 @@ export async function syncCredentialsIn(name: string): Promise<void> {
     name,
     "sh",
     "-c",
-    `mkdir -p /home/agent/.claude && rm -rf ${AGENT_CREDS} && if [ -f ${MOUNT_CREDS} ]; then cp -f ${MOUNT_CREDS} ${AGENT_CREDS} && chmod 600 ${AGENT_CREDS}; fi`,
+    // Only overwrite the agent's credentials if the host mount actually
+    // has non-empty contents. An empty file on the mount would otherwise
+    // wipe a valid in-container file and force a re-login.
+    `mkdir -p /home/agent/.claude && if [ -s ${MOUNT_CREDS} ]; then rm -rf ${AGENT_CREDS} && cp -f ${MOUNT_CREDS} ${AGENT_CREDS} && chmod 600 ${AGENT_CREDS}; fi`,
   ]);
 }
 
@@ -266,14 +269,16 @@ async function buildMinimalClaudeConfig(worktreePath?: string): Promise<string> 
 }
 
 export async function syncClaudeConfigIn(name: string, worktreePath?: string): Promise<void> {
-  if (await fileExists(config.claudeSandboxDir + "/.claude.json")) {
+  if (await fileExistsNonEmpty(config.claudeSandboxDir + "/.claude.json")) {
     await runOrThrow(resolveDockerPath(), [
       "sandbox",
       "exec",
       name,
       "sh",
       "-c",
-      `cp -f ${MOUNT_CONFIG} ${AGENT_CONFIG} && chmod 600 ${AGENT_CONFIG}`,
+      // `-s` guard so a truncated host mount file can't clobber a good
+      // in-container one on re-sync.
+      `if [ -s ${MOUNT_CONFIG} ]; then cp -f ${MOUNT_CONFIG} ${AGENT_CONFIG} && chmod 600 ${AGENT_CONFIG}; fi`,
     ]);
     return;
   }
@@ -303,10 +308,10 @@ export async function syncClaudeConfigIn(name: string, worktreePath?: string): P
   });
 }
 
-async function fileExists(p: string): Promise<boolean> {
+async function fileExistsNonEmpty(p: string): Promise<boolean> {
   try {
-    await fsp.access(p);
-    return true;
+    const stat = await fsp.stat(p);
+    return stat.isFile() && stat.size > 0;
   } catch {
     return false;
   }
@@ -320,7 +325,9 @@ export async function syncCredentialsOut(name: string): Promise<void> {
     name,
     "sh",
     "-c",
-    `if [ -f ${AGENT_CREDS} ]; then rm -rf ${MOUNT_CREDS} && cp -f ${AGENT_CREDS} ${MOUNT_CREDS} && chmod 600 ${MOUNT_CREDS}; fi`,
+    // `-s` (non-empty) instead of `-f` (exists) so a mid-shutdown truncate
+    // inside the sandbox can't flush a 0-byte file over the host mount.
+    `if [ -s ${AGENT_CREDS} ]; then rm -rf ${MOUNT_CREDS} && cp -f ${AGENT_CREDS} ${MOUNT_CREDS} && chmod 600 ${MOUNT_CREDS}; fi`,
   ]);
 }
 
@@ -332,7 +339,7 @@ export async function syncClaudeConfigOut(name: string): Promise<void> {
     name,
     "sh",
     "-c",
-    `if [ -f ${AGENT_CONFIG} ]; then rm -rf ${MOUNT_CONFIG} && cp -f ${AGENT_CONFIG} ${MOUNT_CONFIG} && chmod 600 ${MOUNT_CONFIG}; fi`,
+    `if [ -s ${AGENT_CONFIG} ]; then rm -rf ${MOUNT_CONFIG} && cp -f ${AGENT_CONFIG} ${MOUNT_CONFIG} && chmod 600 ${MOUNT_CONFIG}; fi`,
   ]);
 }
 
