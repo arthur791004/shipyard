@@ -11,7 +11,7 @@ A local dev tool for running multiple isolated Claude Code agents against differ
 - **Dashboard reverse proxy** — `http://my.localhost:3000` always routes to whichever branch is currently marked active, so Calypso's hostname handling (cookies, CORS, session routing) keeps working no matter which branch you're viewing.
 - **Open in Editor / Terminal / Claude** — launch the worktree in VS Code, open a login shell, or attach to the running Claude pty straight from the UI. The terminal panel supports a split layout with an animated fullscreen toggle via the browser View Transitions API.
 - **Git branch merging** — lists all local git branches at startup, so branches you already have appear as "stubs". Clicking Start on a stub creates a worktree, sandbox, and Claude session for it on demand.
-- **Base branch selection** — Create Branch modal lets you pick the base from any local git branch.
+- **Base branch selection** — Add Branch modal lets you pick the base from any local git branch.
 
 ## Architecture
 

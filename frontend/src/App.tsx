@@ -166,6 +166,39 @@ export function App() {
     });
   }
 
+  const trimmedName = name.trim();
+  const existingNames = new Set<string>([
+    ...branches.filter((b) => !b.isTrunk).map((b) => b.name),
+    ...gitBranches,
+  ]);
+  const nameCollides = !!trimmedName && existingNames.has(trimmedName);
+
+  const [remoteExists, setRemoteExists] = useState(false);
+  const [checkingRemote, setCheckingRemote] = useState(false);
+  useEffect(() => {
+    if (!createDisclosure.open || !trimmedName || nameCollides) {
+      setRemoteExists(false);
+      setCheckingRemote(false);
+      return;
+    }
+    let cancelled = false;
+    const handle = window.setTimeout(async () => {
+      setCheckingRemote(true);
+      try {
+        const res = await api.remoteBranchExists(trimmedName);
+        if (!cancelled) setRemoteExists(res.exists);
+      } catch {
+        if (!cancelled) setRemoteExists(false);
+      } finally {
+        if (!cancelled) setCheckingRemote(false);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [trimmedName, nameCollides, createDisclosure.open]);
+
   async function onDelete(b: Branch) {
     if (!confirm(`Delete branch "${b.name}"? Worktree will be removed.`)) return;
     await withPending(b.id, "deleting", async () => {
@@ -230,7 +263,7 @@ export function App() {
               disabled={!activeRepoId}
               onClick={createDisclosure.onOpen}
             >
-              Create branch
+              Add branch
             </Button>
             <Button variant="outline" size="sm" onClick={settingsDisclosure.onOpen}>
               Settings
@@ -254,7 +287,7 @@ export function App() {
           </Box>
         ) : branches.length === 0 ? (
           <Box p={10} textAlign="center" color="gray.400" borderWidth={1} borderColor="gray.700" borderRadius="md">
-            No branches yet. Click "Create branch" to start.
+            No branches yet. Click "Add branch" to start.
           </Box>
         ) : (
           <Box borderWidth={1} borderColor="gray.700" borderRadius="md" overflowX="auto">
@@ -333,23 +366,28 @@ export function App() {
           <Dialog.Positioner>
             <Dialog.Content>
               <Dialog.Header>
-                <Dialog.Title>Create Branch</Dialog.Title>
+                <Dialog.Title>Add Branch</Dialog.Title>
               </Dialog.Header>
               <Dialog.Body>
                 <Stack gap={4}>
-                  <Field.Root>
+                  <Field.Root invalid={nameCollides}>
                     <Field.Label fontSize="xs" color="gray.400">Branch name</Field.Label>
                     <Input
                       autoFocus
-                      placeholder="e.g. fix-header-bug"
+                      placeholder="e.g. fix/header-bug"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") onCreate();
+                        if (e.key === "Enter" && !nameCollides) onCreate();
                       }}
                     />
+                    {nameCollides && (
+                      <Field.ErrorText fontSize="xs">
+                        A branch named <Code>{trimmedName}</Code> already exists.
+                      </Field.ErrorText>
+                    )}
                   </Field.Root>
-                  <Field.Root>
+                  <Field.Root disabled={remoteExists}>
                     <Field.Label fontSize="xs" color="gray.400">Base branch</Field.Label>
                     <NativeSelect.Root>
                       <NativeSelect.Field
@@ -365,6 +403,13 @@ export function App() {
                       </NativeSelect.Field>
                       <NativeSelect.Indicator />
                     </NativeSelect.Root>
+                    <Field.HelperText fontSize="xs" color="gray.500">
+                      {checkingRemote
+                        ? "Checking branch…"
+                        : remoteExists
+                        ? `"${trimmedName}" already exists on origin — it will be checked out as-is.`
+                        : "Base is used only when creating a new branch."}
+                    </Field.HelperText>
                   </Field.Root>
                 </Stack>
               </Dialog.Body>
@@ -373,8 +418,13 @@ export function App() {
                   <Button variant="outline" onClick={createDisclosure.onClose} disabled={submittingCreate}>
                     Cancel
                   </Button>
-                  <Button colorPalette="blue" onClick={onCreate} loading={submittingCreate}>
-                    Create
+                  <Button
+                    colorPalette="blue"
+                    onClick={onCreate}
+                    loading={submittingCreate}
+                    disabled={!trimmedName || nameCollides}
+                  >
+                    Add
                   </Button>
                 </HStack>
               </Dialog.Footer>

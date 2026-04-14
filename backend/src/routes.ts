@@ -247,6 +247,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/git-branches", async () => ({ branches: await listGitBranches() }));
 
+  app.get<{ Querystring: { name?: string } }>("/api/branches/remote-exists", async (req, reply) => {
+    const name = (req.query.name || "").trim();
+    if (!name) return reply.code(400).send({ error: "name required" });
+    const repo = getActiveRepo();
+    if (!repo) return { exists: false };
+    const res = await run("git", ["-C", repo.repoPath, "ls-remote", "--heads", "origin", name]);
+    return { exists: res.code === 0 && res.stdout.trim().length > 0 };
+  });
+
   app.post<{ Body: { name: string; base?: string } }>(
     "/api/branches",
     async (req, reply) => {
@@ -256,12 +265,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!activeRepo) return reply.code(400).send({ error: "no active repo" });
 
       const id = randomUUID().slice(0, 8);
-      const slug = slugify(name) || id;
+      const branchName = name.trim();
+      const folderSlug = slugify(branchName) || id;
       const port = allocatePort();
 
       const branch: Branch = {
         id,
-        name: slug,
+        name: branchName,
         repoId: activeRepo.id,
         worktreePath: "",
         port,
@@ -271,8 +281,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await upsertBranch(branch);
 
       try {
-        const worktreePath = await createWorktree(slug, slug, base);
-        const sbName = sandboxName(slug);
+        const worktreePath = await createWorktree(folderSlug, branchName, base);
+        const sbName = sandboxName(folderSlug);
         await createSandbox(sbName, worktreePath);
         await startSandbox(sbName, worktreePath, port);
         await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
@@ -304,9 +314,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         createdAt: Date.now(),
       };
       await upsertBranch(created);
+      const folderSlug = slugify(gitName) || id;
       try {
-        const worktreePath = await createWorktree(gitName, gitName);
-        const sbName = sandboxName(gitName);
+        const worktreePath = await createWorktree(folderSlug, gitName);
+        const sbName = sandboxName(folderSlug);
         await createSandbox(sbName, worktreePath);
         await startSandbox(sbName, worktreePath, port);
         await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });

@@ -84,6 +84,8 @@ export const api = {
     }).then(j<Branch>),
   gitBranches: () =>
     fetch("/api/git-branches").then(j<{ branches: string[] }>),
+  remoteBranchExists: (name: string) =>
+    fetch(`/api/branches/remote-exists?name=${encodeURIComponent(name)}`).then(j<{ exists: boolean }>),
   toggle: (id: string) => fetch(`/api/branches/${id}/toggle`, { method: "POST" }).then(j<Branch>),
   startDashboard: (id: string) =>
     fetch(`/api/branches/${id}/start-dashboard`, { method: "POST" }).then(j<{ running: true }>),
