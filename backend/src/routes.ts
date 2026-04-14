@@ -5,19 +5,28 @@ import { deriveRepoPaths } from "./config.js";
 import { ensureDashboardRunning, isPortOpen, stopDashboard, waitForDashboard } from "./dashboard.js";
 import {
   Branch,
-  TRUNK_ID,
+  Repo,
+  addRepo,
   allocatePort,
   getActiveBranchId,
+  getActiveRepo,
   getBranch,
+  getRepo,
   getSettings,
+  isTrunk,
   listBranches,
+  listRepos,
   removeBranch,
+  removeRepo,
   setActiveBranchId,
+  setActiveRepoId,
+  trunkBranchId,
   updateBranch,
+  updateRepo,
   updateSettings,
   upsertBranch,
 } from "./state.js";
-import { createWorktree, deleteBranch as deleteGitBranch, detectDefaultBranch, ensureRepo, listGitBranches, removeWorktree } from "./worktree.js";
+import { createWorktree, deleteBranch as deleteGitBranch, detectDefaultBranch, listGitBranches, removeWorktree } from "./worktree.js";
 import { run, runOrThrow } from "./shell.js";
 import {
   createSandbox,
@@ -40,69 +49,120 @@ function slugify(input: string): string {
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  async function symlinkRepo(repoPath: string, linkTarget: string): Promise<void> {
+    const fs = await import("node:fs/promises");
+    await fs.mkdir(path.dirname(repoPath), { recursive: true });
+    try {
+      const stat = await fs.lstat(repoPath);
+      if (stat.isSymbolicLink() || stat.isDirectory() || stat.isFile()) {
+        await fs.rm(repoPath, { recursive: true, force: true });
+      }
+    } catch {}
+    await fs.symlink(linkTarget, repoPath);
+  }
+
   app.get("/api/settings", async () => {
     const settings = getSettings();
-    const fs = await import("node:fs/promises");
-    const path = await import("node:path");
-    let repoExists = false;
-    try {
-      await fs.access(path.join(settings.repoPath, ".git"));
-      repoExists = true;
-    } catch {}
-    let repoLinkTarget: string | undefined;
-    try {
-      const lstat = await fs.lstat(settings.repoPath);
-      if (lstat.isSymbolicLink()) {
-        repoLinkTarget = await fs.readlink(settings.repoPath);
-      }
-    } catch {}
-    return { ...settings, repoExists, repoLinkTarget };
+    return { ...settings, configured: listRepos().length > 0 };
   });
 
-  app.put<{ Body: Partial<{ repoUrl: string; repoPath: string; worktreesDir: string; configured: boolean; linkTarget: string; dashboardInstallCmd: string; dashboardStartCmd: string }> }>(
+  app.put<{ Body: Partial<{ repoUrl: string; configured: boolean }> }>(
     "/api/settings",
+    async (req) => {
+      return await updateSettings(req.body ?? {});
+    }
+  );
+
+  app.get("/api/repos", async () => {
+    const repos = listRepos();
+    return { repos, activeRepoId: getActiveRepo()?.id };
+  });
+
+  app.post<{ Body: { linkTarget: string } }>("/api/repos", async (req, reply) => {
+    const { linkTarget } = req.body ?? ({} as any);
+    if (!linkTarget) return reply.code(400).send({ error: "linkTarget required" });
+
+    const cleaned = linkTarget.replace(/\/+$/, "");
+    const name = path.basename(cleaned) || "repo";
+    const defaultBranch = await detectDefaultBranch(cleaned);
+    const { repoPath, worktreesDir } = deriveRepoPaths(name, defaultBranch);
+
+    for (const existing of listRepos()) {
+      if (existing.linkTarget === cleaned) {
+        return reply.code(409).send({ error: `Repo already added: ${existing.name}` });
+      }
+    }
+
+    try {
+      await symlinkRepo(repoPath, cleaned);
+    } catch (err: any) {
+      return reply.code(500).send({ error: `Failed to symlink repo: ${err.message}` });
+    }
+
+    const repo: Repo = {
+      id: randomUUID().slice(0, 8),
+      name,
+      linkTarget: cleaned,
+      repoPath,
+      worktreesDir,
+      defaultBranch,
+      createdAt: Date.now(),
+    };
+    await addRepo(repo, true);
+    return { repo, activeRepoId: repo.id };
+  });
+
+  app.put<{ Params: { id: string }; Body: Partial<Pick<Repo, "dashboardInstallCmd" | "dashboardStartCmd">> }>(
+    "/api/repos/:id",
     async (req, reply) => {
-      const { linkTarget, ...patch } = req.body ?? {};
-      let derived: ReturnType<typeof deriveRepoPaths> | undefined;
-      let defaultBranch: string | undefined;
-      if (linkTarget) {
-        const repoName = path.basename(linkTarget.replace(/\/+$/, "")) || "repo";
-        defaultBranch = await detectDefaultBranch(linkTarget);
-        derived = deriveRepoPaths(repoName, defaultBranch);
-      }
-      const next = await updateSettings({
-        ...patch,
-        ...(derived ?? {}),
-        ...(defaultBranch ? { defaultBranch } : {}),
-        configured: true,
-      });
-      if (derived) {
-        await updateBranch(TRUNK_ID, { worktreePath: next.repoPath }).catch(() => {});
-      }
-      if (linkTarget) {
-        try {
-          const fs = await import("node:fs/promises");
-          await fs.mkdir(path.dirname(next.repoPath), { recursive: true });
-          try {
-            const stat = await fs.lstat(next.repoPath);
-            if (stat.isSymbolicLink() || stat.isDirectory() || stat.isFile()) {
-              await fs.rm(next.repoPath, { recursive: true, force: true });
-            }
-          } catch {}
-          await fs.symlink(linkTarget, next.repoPath);
-        } catch (err: any) {
-          return reply.code(500).send({ error: `Failed to symlink repo: ${err.message}`, settings: next });
-        }
-      } else {
-        try {
-          await ensureRepo();
-        } catch (err: any) {
-          return reply.code(500).send({ error: `Failed to clone repo: ${err.message}`, settings: next });
-        }
-      }
+      const repo = getRepo(req.params.id);
+      if (!repo) return reply.code(404).send({ error: "repo not found" });
+      const next = await updateRepo(repo.id, req.body ?? {});
       return next;
     }
   );
+
+  app.post<{ Params: { id: string } }>("/api/repos/:id/activate", async (req, reply) => {
+    const repo = getRepo(req.params.id);
+    if (!repo) return reply.code(404).send({ error: "repo not found" });
+    const next = await setActiveRepoId(repo.id);
+    const trunk = getBranch(trunkBranchId(repo.id));
+    if (trunk && trunk.status !== "running") {
+      try {
+        await ensureDashboardRunning(trunk.worktreePath, trunk.port);
+        await updateBranch(trunk.id, { status: "running", error: undefined });
+      } catch (err: any) {
+        console.error(`failed to start trunk dashboard for repo ${repo.id}:`, err);
+      }
+    }
+    return { repo: next, activeRepoId: next.id };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/repos/:id", async (req, reply) => {
+    const repo = getRepo(req.params.id);
+    if (!repo) return reply.code(404).send({ error: "repo not found" });
+
+    for (const branch of Object.values(listBranchesForRepo(repo.id))) {
+      if (branch.sandboxName) {
+        await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+        await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+      }
+      if (branch.worktreePath && !isTrunk(branch)) {
+        await removeWorktree(branch.worktreePath).catch(() => {});
+      }
+    }
+    stopDashboard(repo.repoPath);
+    try {
+      const fs = await import("node:fs/promises");
+      await fs.rm(repo.repoPath, { force: true });
+    } catch {}
+    await removeRepo(repo.id);
+    return { ok: true, activeRepoId: getActiveRepo()?.id };
+  });
+
+  function listBranchesForRepo(repoId: string): Branch[] {
+    return listBranches().filter((b) => b.repoId === repoId);
+  }
 
   app.post("/api/pick-folder", async (_req, reply) => {
     try {
@@ -123,11 +183,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const stateBranches = listBranches();
     const takenNames = new Set(stateBranches.map((b) => b.name));
     const localGit = await listGitBranches();
+    const activeRepo = getActiveRepo();
     const stubs: Branch[] = localGit
       .filter((n) => !takenNames.has(n))
       .map((name) => ({
         id: `git:${name}`,
         name,
+        repoId: activeRepo?.id ?? "",
         worktreePath: "",
         port: 0,
         status: "stopped",
@@ -137,10 +199,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
       return a.name.localeCompare(b.name);
     });
-    const baseBranch = getSettings().defaultBranch || "trunk";
+    const baseBranch = getActiveRepo()?.defaultBranch || "trunk";
     const enriched = await Promise.all(
       merged.map(async (b) => {
-        if (b.id === TRUNK_ID || !b.worktreePath) return { ...b, hasChanges: false };
+        if (isTrunk(b) || !b.worktreePath) return { ...b, hasChanges: false };
         const res = await run("git", [
           "-C",
           b.worktreePath,
@@ -162,6 +224,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const { name, base } = req.body ?? ({} as any);
       if (!name) return reply.code(400).send({ error: "name required" });
+      const activeRepo = getActiveRepo();
+      if (!activeRepo) return reply.code(400).send({ error: "no active repo" });
 
       const id = randomUUID().slice(0, 8);
       const slug = slugify(name) || id;
@@ -170,6 +234,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const branch: Branch = {
         id,
         name: slug,
+        repoId: activeRepo.id,
         worktreePath: "",
         port,
         status: "creating",
@@ -197,11 +262,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     if (!branch && req.params.id.startsWith("git:")) {
       const gitName = req.params.id.slice(4);
+      const activeRepo = getActiveRepo();
+      if (!activeRepo) return reply.code(400).send({ error: "no active repo" });
       const id = randomUUID().slice(0, 8);
       const port = allocatePort();
       const created: Branch = {
         id,
         name: gitName,
+        repoId: activeRepo.id,
         worktreePath: "",
         port,
         status: "creating",
@@ -223,7 +291,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     if (!branch) return reply.code(404).send({ error: "not found" });
 
-    if (branch.id === TRUNK_ID) {
+    if (isTrunk(branch)) {
       if (branch.status === "running") {
         stopDashboard(branch.worktreePath);
         await updateBranch(branch.id, { status: "stopped" });
@@ -277,7 +345,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>("/api/branches/:id/create-pr", async (req, reply) => {
     const branch = getBranch(req.params.id);
     if (!branch) return reply.code(404).send({ error: "not found" });
-    if (branch.id === TRUNK_ID) return reply.code(400).send({ error: "cannot create PR for trunk" });
+    if (isTrunk(branch)) return reply.code(400).send({ error: "cannot create PR for trunk" });
     if (!branch.worktreePath) return reply.code(400).send({ error: "no worktree" });
 
     try {
@@ -332,8 +400,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.delete<{ Params: { id: string } }>("/api/branches/:id", async (req, reply) => {
     if (req.params.id.startsWith("git:")) {
       const name = req.params.id.slice(4);
+      const activeRepo = getActiveRepo();
+      if (!activeRepo) return reply.code(400).send({ error: "no active repo" });
       try {
-        await runOrThrow("git", ["-C", getSettings().repoPath, "branch", "-D", name]);
+        await runOrThrow("git", ["-C", activeRepo.repoPath, "branch", "-D", name]);
         return { ok: true };
       } catch (err: any) {
         return reply.code(500).send({ error: err.message });
@@ -342,7 +412,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     const branch = getBranch(req.params.id);
     if (!branch) return reply.code(404).send({ error: "not found" });
-    if (branch.id === TRUNK_ID) return reply.code(400).send({ error: "trunk cannot be deleted" });
+    if (isTrunk(branch)) return reply.code(400).send({ error: "trunk cannot be deleted" });
     if (branch.sandboxName) {
       await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
       await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});

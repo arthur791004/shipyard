@@ -1,6 +1,8 @@
 export interface Branch {
   id: string;
   name: string;
+  repoId: string;
+  isTrunk?: boolean;
   worktreePath: string;
   sandboxName?: string;
   port: number;
@@ -11,6 +13,18 @@ export interface Branch {
   hasChanges?: boolean;
 }
 
+export interface Repo {
+  id: string;
+  name: string;
+  linkTarget: string;
+  repoPath: string;
+  worktreesDir: string;
+  defaultBranch: string;
+  dashboardInstallCmd?: string;
+  dashboardStartCmd?: string;
+  createdAt: number;
+}
+
 async function j<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json() as Promise<T>;
@@ -18,22 +32,12 @@ async function j<T>(res: Response): Promise<T> {
 
 export interface Settings {
   repoUrl: string;
-  repoPath: string;
-  worktreesDir: string;
   configured: boolean;
-  dashboardInstallCmd?: string;
-  dashboardStartCmd?: string;
-  repoExists?: boolean;
-  repoLinkTarget?: string;
-}
-
-export interface SaveSettingsBody extends Partial<Settings> {
-  linkTarget?: string;
 }
 
 export const api = {
   getSettings: () => fetch("/api/settings").then(j<Settings>),
-  saveSettings: (body: SaveSettingsBody) =>
+  saveSettings: (body: Partial<Settings>) =>
     fetch("/api/settings", {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -45,6 +49,24 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
     return await res.json();
   },
+  listRepos: () =>
+    fetch("/api/repos").then(j<{ repos: Repo[]; activeRepoId?: string }>),
+  addRepo: (linkTarget: string) =>
+    fetch("/api/repos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ linkTarget }),
+    }).then(j<{ repo: Repo; activeRepoId: string }>),
+  updateRepo: (id: string, body: Partial<Pick<Repo, "dashboardInstallCmd" | "dashboardStartCmd">>) =>
+    fetch(`/api/repos/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(j<Repo>),
+  activateRepo: (id: string) =>
+    fetch(`/api/repos/${id}/activate`, { method: "POST" }).then(j<{ repo: Repo; activeRepoId: string }>),
+  removeRepo: (id: string) =>
+    fetch(`/api/repos/${id}`, { method: "DELETE" }).then(j<{ ok: true; activeRepoId?: string }>),
   list: () => fetch("/api/branches").then(j<{ branches: Branch[]; activeBranchId?: string }>),
   create: (body: { name: string; base?: string }) =>
     fetch("/api/branches", {

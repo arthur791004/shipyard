@@ -1,6 +1,6 @@
 import { FastifyInstance } from "fastify";
 import pty, { IPty } from "node-pty";
-import { getBranch, TRUNK_ID } from "./state.js";
+import { getBranch, isTrunk } from "./state.js";
 import { attachSandbox, resolveDockerPath } from "./docker.js";
 import { attachSharedPty, ensureSharedPty } from "./sharedPty.js";
 import { dashboardKey } from "./dashboard.js";
@@ -52,8 +52,8 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
         return;
       }
 
-      if (branch.id === TRUNK_ID) {
-        const key = `trunk:${kind}`;
+      if (isTrunk(branch)) {
+        const key = `${branch.id}:${kind}`;
         const shellCmd = kind === "claude" ? "claude" : "exec $SHELL -l";
         ensureSharedPty(key, () =>
           pty.spawn("/bin/sh", ["-lc", shellCmd], {

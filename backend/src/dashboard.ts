@@ -4,7 +4,7 @@ import { ensureSharedPty, killSharedPty } from "./sharedPty.js";
 import {
   DEFAULT_DASHBOARD_INSTALL_CMD,
   DEFAULT_DASHBOARD_START_CMD,
-  getSettings,
+  getActiveRepo,
 } from "./state.js";
 
 export function dashboardKey(worktreePath: string): string {
@@ -28,9 +28,9 @@ export function isPortOpen(port: number): Promise<boolean> {
 
 export async function ensureDashboardRunning(worktreePath: string, port: number): Promise<void> {
   if (await isPortOpen(port)) return;
-  const settings = getSettings();
-  const installCmd = settings.dashboardInstallCmd?.trim() || DEFAULT_DASHBOARD_INSTALL_CMD;
-  const startCmd = settings.dashboardStartCmd?.trim() || DEFAULT_DASHBOARD_START_CMD;
+  const repo = getActiveRepo();
+  const installCmd = repo?.dashboardInstallCmd?.trim() || DEFAULT_DASHBOARD_INSTALL_CMD;
+  const startCmd = repo?.dashboardStartCmd?.trim() || DEFAULT_DASHBOARD_START_CMD;
   const shellCmd = `${installCmd} && PORT=${port} ${startCmd}`;
   ensureSharedPty(dashboardKey(worktreePath), () =>
     pty.spawn("/bin/sh", ["-lc", shellCmd], {

@@ -9,53 +9,39 @@ import {
   Input,
   Portal,
   Stack,
+  Text,
 } from "@chakra-ui/react";
-import { api, SaveSettingsBody, Settings } from "./api";
+import { api, Repo } from "./api";
 
 interface Props {
   open: boolean;
-  initial: Settings;
+  activeRepo: Repo | null;
   firstRun: boolean;
   onClose: () => void;
-  onSaved: (s: Settings) => void;
+  onAddRepo: () => Promise<void> | void;
+  onSaved: (r: Repo) => void;
 }
 
-export function SettingsModal({ open, initial, firstRun, onClose, onSaved }: Props) {
-  const [linkTarget, setLinkTarget] = useState<string>(initial.repoLinkTarget ?? "");
-  const [installCmd, setInstallCmd] = useState<string>(initial.dashboardInstallCmd ?? "");
-  const [startCmd, setStartCmd] = useState<string>(initial.dashboardStartCmd ?? "");
+export function SettingsModal({ open, activeRepo, firstRun, onClose, onAddRepo, onSaved }: Props) {
+  const [installCmd, setInstallCmd] = useState<string>(activeRepo?.dashboardInstallCmd ?? "");
+  const [startCmd, setStartCmd] = useState<string>(activeRepo?.dashboardStartCmd ?? "");
   const [saving, setSaving] = useState(false);
-  const [picking, setPicking] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    setLinkTarget(initial.repoLinkTarget ?? "");
-    setInstallCmd(initial.dashboardInstallCmd ?? "");
-    setStartCmd(initial.dashboardStartCmd ?? "");
-  }, [initial.repoLinkTarget, initial.dashboardInstallCmd, initial.dashboardStartCmd]);
-
-  async function pick() {
-    setPicking(true);
-    setErr(null);
-    try {
-      const res = await api.pickFolder();
-      if (res) setLinkTarget(res.path);
-    } catch (e: any) {
-      setErr(e.message);
-    } finally {
-      setPicking(false);
-    }
-  }
+    setInstallCmd(activeRepo?.dashboardInstallCmd ?? "");
+    setStartCmd(activeRepo?.dashboardStartCmd ?? "");
+  }, [activeRepo?.id, activeRepo?.dashboardInstallCmd, activeRepo?.dashboardStartCmd]);
 
   async function save() {
+    if (!activeRepo) return;
     setSaving(true);
     setErr(null);
     try {
-      const body: SaveSettingsBody = {};
-      if (linkTarget) body.linkTarget = linkTarget;
-      body.dashboardInstallCmd = installCmd.trim();
-      body.dashboardStartCmd = startCmd.trim();
-      const next = await api.saveSettings(body);
+      const next = await api.updateRepo(activeRepo.id, {
+        dashboardInstallCmd: installCmd.trim(),
+        dashboardStartCmd: startCmd.trim(),
+      });
       onSaved(next);
       onClose();
     } catch (e: any) {
@@ -83,71 +69,65 @@ export function SettingsModal({ open, initial, firstRun, onClose, onSaved }: Pro
             </Dialog.Header>
             <Dialog.Body>
               <Stack gap={5}>
-                <Field.Root required={firstRun}>
-                  <Field.Label fontSize="xs" color="gray.400">
-                    Repo folder {firstRun && <Field.RequiredIndicator />}
-                  </Field.Label>
-                  <HStack gap={2} w="100%">
-                    <Input
-                      readOnly
-                      value={linkTarget}
-                      placeholder="No folder selected"
-                      onClick={pick}
-                      cursor="pointer"
-                      fontFamily="mono"
-                      fontSize="sm"
-                      _placeholder={{ color: "gray.500", fontFamily: "body" }}
-                    />
-                    <Button
-                      variant="subtle"
-                      onClick={pick}
-                      loading={picking}
-                      disabled={saving}
-                      flexShrink={0}
-                    >
-                      {linkTarget ? "Change…" : "Choose…"}
-                    </Button>
-                    {linkTarget && (
-                      <Button
-                        variant="ghost"
-                        onClick={() => setLinkTarget("")}
-                        disabled={saving || picking}
-                        flexShrink={0}
-                        color="gray.400"
-                      >
-                        Clear
+                {!activeRepo ? (
+                  <Stack gap={3}>
+                    <Text color="gray.400">
+                      No repo configured yet. Add your first one to get started.
+                    </Text>
+                    <HStack>
+                      <Button colorPalette="blue" onClick={() => onAddRepo()}>
+                        + Add repo…
                       </Button>
-                    )}
-                  </HStack>
-                  <Field.HelperText fontSize="xs" color="gray.500">
-                    Pick your local <Code colorPalette="gray">{initial.repoUrl}</Code> checkout. The tool
-                    symlinks it into the worktrees directory — nothing is cloned or copied.
-                  </Field.HelperText>
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label fontSize="xs" color="gray.400">Dashboard install command</Field.Label>
-                  <Input
-                    placeholder="yarn install"
-                    value={installCmd}
-                    onChange={(e) => setInstallCmd(e.target.value)}
-                    disabled={saving}
-                  />
-                  <Field.HelperText fontSize="xs" color="gray.500">
-                    Runs in each worktree before the dev server. Leave blank for <Code>yarn install</Code>.
-                  </Field.HelperText>
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label fontSize="xs" color="gray.400">Dashboard start command</Field.Label>
-                  <Input
-                    placeholder="yarn start-dashboard"
-                    value={startCmd}
-                    onChange={(e) => setStartCmd(e.target.value)}
-                    disabled={saving}
-                  />
-                  <Field.HelperText fontSize="xs" color="gray.500">
-                    Invoked as <Code>PORT=&lt;port&gt; &lt;cmd&gt;</Code>. Leave blank for <Code>yarn start-dashboard</Code>.
-                  </Field.HelperText>
-                </Field.Root>
+                    </HStack>
+                  </Stack>
+                ) : (
+                  <>
+                    <Stack gap={1}>
+                      <Text fontSize="xs" color="gray.400" textTransform="uppercase">
+                        Active repo
+                      </Text>
+                      <Text fontFamily="mono" fontSize="sm" truncate>
+                        {activeRepo.name}{" "}
+                        <Text as="span" color="gray.500">
+                          ({activeRepo.linkTarget})
+                        </Text>
+                      </Text>
+                      <Text fontSize="xs" color="gray.500">
+                        Default branch: <Code>{activeRepo.defaultBranch}</Code>. Use the repo switcher in the header
+                        to add another repo or change the active one.
+                      </Text>
+                    </Stack>
+                    <Field.Root>
+                      <Field.Label fontSize="xs" color="gray.400">
+                        Dashboard install command
+                      </Field.Label>
+                      <Input
+                        placeholder="yarn install"
+                        value={installCmd}
+                        onChange={(e) => setInstallCmd(e.target.value)}
+                        disabled={saving}
+                      />
+                      <Field.HelperText fontSize="xs" color="gray.500">
+                        Runs in each worktree before the dev server. Leave blank for <Code>yarn install</Code>.
+                      </Field.HelperText>
+                    </Field.Root>
+                    <Field.Root>
+                      <Field.Label fontSize="xs" color="gray.400">
+                        Dashboard start command
+                      </Field.Label>
+                      <Input
+                        placeholder="yarn start-dashboard"
+                        value={startCmd}
+                        onChange={(e) => setStartCmd(e.target.value)}
+                        disabled={saving}
+                      />
+                      <Field.HelperText fontSize="xs" color="gray.500">
+                        Invoked as <Code>PORT=&lt;port&gt; &lt;cmd&gt;</Code>. Leave blank for{" "}
+                        <Code>yarn start-dashboard</Code>.
+                      </Field.HelperText>
+                    </Field.Root>
+                  </>
+                )}
                 {err && (
                   <Alert.Root status="error">
                     <Alert.Indicator />
@@ -160,12 +140,14 @@ export function SettingsModal({ open, initial, firstRun, onClose, onSaved }: Pro
               <HStack gap={2}>
                 {!firstRun && (
                   <Button variant="outline" onClick={onClose} disabled={saving}>
-                    Cancel
+                    Close
                   </Button>
                 )}
-                <Button colorPalette="blue" onClick={save} loading={saving} disabled={firstRun && !linkTarget}>
-                  Save
-                </Button>
+                {activeRepo && (
+                  <Button colorPalette="blue" onClick={save} loading={saving}>
+                    Save
+                  </Button>
+                )}
               </HStack>
             </Dialog.Footer>
           </Dialog.Content>

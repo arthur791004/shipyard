@@ -20,15 +20,18 @@ import {
   useClipboard,
   useDisclosure,
 } from "@chakra-ui/react";
-import { api, Branch, Settings } from "./api";
+import { api, Branch, Repo, Settings } from "./api";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalModal, TerminalKind } from "./TerminalModal";
+import { RepoSwitcher } from "./RepoSwitcher";
 import { toaster } from "./Toaster";
 
 export function App() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [activeId, setActiveId] = useState<string | undefined>();
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [repos, setRepos] = useState<Repo[]>([]);
+  const [activeRepoId, setActiveRepoId] = useState<string | undefined>();
   const settingsDisclosure = useDisclosure();
   const createDisclosure = useDisclosure();
   const [submittingCreate, setSubmittingCreate] = useState(false);
@@ -60,11 +63,22 @@ export function App() {
   );
 
   const openSettings = settingsDisclosure.onOpen;
+
+  const refreshRepos = useCallback(async () => {
+    const res = await api.listRepos();
+    setRepos(res.repos);
+    setActiveRepoId(res.activeRepoId);
+    return res;
+  }, []);
+
   useEffect(() => {
-    api.getSettings().then((s) => {
+    (async () => {
+      const [s, repoRes] = await Promise.all([api.getSettings(), api.listRepos()]);
       setSettings(s);
-      if (!s.configured || !s.repoExists) openSettings();
-    });
+      setRepos(repoRes.repos);
+      setActiveRepoId(repoRes.activeRepoId);
+      if (repoRes.repos.length === 0) openSettings();
+    })();
   }, [openSettings]);
 
   const refresh = useCallback(async () => {
@@ -182,11 +196,26 @@ export function App() {
           minH="40px"
           overflow="hidden"
         >
-          <Heading size="md" flexShrink={0} whiteSpace="nowrap">
-            Calypso Multi-Agent
-          </Heading>
+          <HStack gap={3} minW={0} flexShrink={1}>
+            <Heading size="md" flexShrink={0} whiteSpace="nowrap">
+              Calypso Multi-Agent
+            </Heading>
+            <RepoSwitcher
+              repos={repos}
+              activeRepoId={activeRepoId}
+              onChanged={async () => {
+                await refreshRepos();
+                await refresh();
+              }}
+            />
+          </HStack>
           <HStack gap={2} flexShrink={0} flexWrap="nowrap">
-            <Button colorPalette="blue" size="sm" onClick={createDisclosure.onOpen}>
+            <Button
+              colorPalette="blue"
+              size="sm"
+              disabled={!activeRepoId}
+              onClick={createDisclosure.onOpen}
+            >
               Create branch
             </Button>
             <Button variant="outline" size="sm" onClick={settingsDisclosure.onOpen}>
@@ -326,15 +355,27 @@ export function App() {
         </Portal>
       </Dialog.Root>
 
-      {settings && (
-        <SettingsModal
-          open={settingsDisclosure.open}
-          initial={settings}
-          firstRun={!settings.configured || !settings.repoExists}
-          onClose={settingsDisclosure.onClose}
-          onSaved={(s) => setSettings(s)}
-        />
-      )}
+      <SettingsModal
+        open={settingsDisclosure.open}
+        activeRepo={repos.find((r) => r.id === activeRepoId) ?? null}
+        firstRun={repos.length === 0}
+        onClose={settingsDisclosure.onClose}
+        onAddRepo={async () => {
+          try {
+            const picked = await api.pickFolder();
+            if (!picked) return;
+            await api.addRepo(picked.path);
+            await refreshRepos();
+            await refresh();
+            settingsDisclosure.onClose();
+          } catch (e: any) {
+            toaster.create({ type: "error", title: e.message, duration: 6000 });
+          }
+        }}
+        onSaved={async () => {
+          await refreshRepos();
+        }}
+      />
     </Flex>
   );
 }
