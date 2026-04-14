@@ -37,7 +37,6 @@ export function App() {
   const [activeRepoId, setActiveRepoId] = useState<string | undefined>();
   const settingsDisclosure = useDisclosure();
   const createDisclosure = useDisclosure();
-  const [submittingCreate, setSubmittingCreate] = useState(false);
   const [name, setName] = useState("");
   const [baseBranch, setBaseBranch] = useState("trunk");
   const [gitBranches, setGitBranches] = useState<string[]>([]);
@@ -129,19 +128,20 @@ export function App() {
     }
   }
 
-  async function onCreate() {
-    if (!name.trim() || submittingCreate) return;
-    setSubmittingCreate(true);
-    try {
-      await api.create({ name: name.trim(), base: baseBranch });
-      setName("");
-      createDisclosure.onClose();
-      await refresh();
-    } catch (err: any) {
-      toaster.create({ type: "error", title: err?.message ?? "Create failed", duration: 6000 });
-    } finally {
-      setSubmittingCreate(false);
-    }
+  function onCreate() {
+    const trimmed = name.trim();
+    if (!trimmed || nameCollides) return;
+    const body = { name: trimmed, base: baseBranch };
+    setName("");
+    createDisclosure.onClose();
+    api
+      .create(body)
+      .then(() => refresh())
+      .catch((err: any) =>
+        toaster.create({ type: "error", title: err?.message ?? "Create failed", duration: 6000 })
+      );
+    // kick off an early refresh so the "creating" row appears without waiting on the poll
+    refresh().catch(() => {});
   }
 
   async function onToggle(b: Branch) {
@@ -415,14 +415,14 @@ export function App() {
               </Dialog.Body>
               <Dialog.Footer>
                 <HStack gap={2}>
-                  <Button variant="outline" onClick={createDisclosure.onClose} disabled={submittingCreate}>
+                  <Button variant="outline" onClick={createDisclosure.onClose}>
                     Cancel
                   </Button>
                   <Button
                     colorPalette="blue"
                     onClick={onCreate}
-                    loading={submittingCreate}
-                    disabled={!trimmedName || nameCollides}
+                    loading={checkingRemote}
+                    disabled={!trimmedName || nameCollides || checkingRemote}
                   >
                     Add
                   </Button>
