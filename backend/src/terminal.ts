@@ -3,7 +3,7 @@ import pty, { IPty } from "node-pty";
 import { getBranch, isTrunk } from "./state.js";
 import { attachSandbox, reattachSandbox, resolveDockerPath } from "./docker.js";
 import { attachSharedPty, ensureSharedPty } from "./sharedPty.js";
-import { dashboardKey } from "./dashboard.js";
+import { dashboardKey, ensureDashboardRunning } from "./dashboard.js";
 
 export async function registerTerminal(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string }; Querystring: { kind?: string } }>(
@@ -27,12 +27,29 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
           : "claude";
 
       if (kind === "dashboard") {
-        const handle = attachSharedPty(dashboardKey(branch.worktreePath), (data) => {
+        const onData = (data: string) => {
           try { socket.send(data); } catch {}
-        });
+        };
+        let handle = attachSharedPty(dashboardKey(branch.worktreePath), onData);
+        if (!handle) {
+          // No live dashboard pty yet — start one and retry the attach. Used
+          // when the user opens the Logs tab for trunk before its dashboard
+          // has been booted, or after the dashboard exited and needs a fresh
+          // spawn.
+          try {
+            await ensureDashboardRunning(branch.worktreePath, branch.port);
+          } catch (err) {
+            try {
+              socket.send(`\r\n[dashboard failed to start: ${(err as Error).message}]\r\n`);
+              socket.close();
+            } catch {}
+            return;
+          }
+          handle = attachSharedPty(dashboardKey(branch.worktreePath), onData);
+        }
         if (!handle) {
           try {
-            socket.send("\r\n[dashboard not running — start it first]\r\n");
+            socket.send("\r\n[dashboard failed to start]\r\n");
             socket.close();
           } catch {}
           return;
@@ -41,13 +58,13 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
           const msg = raw.toString();
           if (msg.startsWith("\x01resize:")) {
             const [cols, rows] = msg.slice(8).split(",").map(Number);
-            if (cols && rows) handle.resize(cols, rows);
+            if (cols && rows) handle!.resize(cols, rows);
             return;
           }
-          handle.write(msg);
+          handle!.write(msg);
         });
         socket.on("close", () => {
-          handle.unsubscribe();
+          handle!.unsubscribe();
         });
         return;
       }

@@ -9,7 +9,6 @@ export interface Branch {
   status: "creating" | "stopped" | "starting" | "running" | "error";
   createdAt: number;
   error?: string;
-  prUrl?: string;
   hasChanges?: boolean;
 }
 
@@ -22,6 +21,7 @@ export interface Repo {
   defaultBranch: string;
   dashboardInstallCmd?: string;
   dashboardStartCmd?: string;
+  previewUrl?: string;
   createdAt: number;
 }
 
@@ -33,6 +33,18 @@ async function j<T>(res: Response): Promise<T> {
 export interface Settings {
   repoUrl: string;
   configured: boolean;
+  maxConcurrentSandboxes?: number;
+}
+
+export interface Session {
+  id: string;
+  repo: string;
+  branch: string;
+  issueUrl?: string;
+  linearUrl?: string;
+  summary?: string;
+  createdAt: number;
+  completedAt?: number;
 }
 
 export interface SystemCheck {
@@ -65,7 +77,7 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     }).then(j<{ repo: Repo; activeRepoId: string }>),
-  updateRepo: (id: string, body: Partial<Pick<Repo, "dashboardInstallCmd" | "dashboardStartCmd">>) =>
+  updateRepo: (id: string, body: Partial<Pick<Repo, "dashboardInstallCmd" | "dashboardStartCmd" | "previewUrl">>) =>
     fetch(`/api/repos/${id}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -82,6 +94,12 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     }).then(j<Branch>),
+  command: (command: string) =>
+    fetch("/api/commands", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command }),
+    }).then(j<{ kind: string; branch?: Branch }>),
   gitBranches: () =>
     fetch("/api/git-branches").then(j<{ branches: string[] }>),
   remoteBranchExists: (name: string) =>
@@ -91,10 +109,6 @@ export const api = {
   startDashboard: (id: string) =>
     fetch(`/api/branches/${encodeURIComponent(id)}/start-dashboard`, { method: "POST" }).then(
       j<{ running: true }>
-    ),
-  createPR: (id: string) =>
-    fetch(`/api/branches/${encodeURIComponent(id)}/create-pr`, { method: "POST" }).then(
-      j<{ url: string }>
     ),
   openEditor: (id: string) =>
     fetch(`/api/branches/${encodeURIComponent(id)}/open-editor`, { method: "POST" }).then(
@@ -108,4 +122,5 @@ export const api = {
     fetch(`/api/branches/${encodeURIComponent(id)}/logs`).then(j<{ logs: string }>),
   remove: (id: string) =>
     fetch(`/api/branches/${encodeURIComponent(id)}`, { method: "DELETE" }).then(j<{ ok: true }>),
+  sessions: () => fetch("/api/sessions").then(j<{ sessions: Session[] }>),
 };

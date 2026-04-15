@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { FastifyInstance } from "fastify";
 import path from "node:path";
-import { deriveRepoPaths } from "./config.js";
+import { config, deriveRepoPaths } from "./config.js";
 import { ensureDashboardRunning, isPortOpen, stopDashboard, waitForDashboard } from "./dashboard.js";
 import {
   Branch,
@@ -36,6 +36,7 @@ import {
   startSandbox,
   stopSandbox,
 } from "./docker.js";
+import { createSession, ensureSession, listSessions } from "./sessions.js";
 
 function slugify(input: string): string {
   return (
@@ -63,7 +64,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/settings", async () => {
     const settings = getSettings();
-    return { ...settings, configured: listRepos().length > 0 };
+    return {
+      ...settings,
+      configured: listRepos().length > 0,
+      maxConcurrentSandboxes: config.maxConcurrentSandboxes,
+    };
   });
 
   app.get("/api/system-check", async () => {
@@ -103,9 +108,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post<{
-    Body: { linkTarget: string; dashboardInstallCmd?: string; dashboardStartCmd?: string };
+    Body: { linkTarget: string; dashboardInstallCmd?: string; dashboardStartCmd?: string; previewUrl?: string };
   }>("/api/repos", async (req, reply) => {
-    const { linkTarget, dashboardInstallCmd, dashboardStartCmd } = req.body ?? ({} as any);
+    const { linkTarget, dashboardInstallCmd, dashboardStartCmd, previewUrl } = req.body ?? ({} as any);
     if (!linkTarget) return reply.code(400).send({ error: "linkTarget required" });
 
     const cleaned = linkTarget.replace(/\/+$/, "");
@@ -134,13 +139,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       defaultBranch,
       dashboardInstallCmd: dashboardInstallCmd?.trim() || undefined,
       dashboardStartCmd: dashboardStartCmd?.trim() || undefined,
+      previewUrl: previewUrl?.trim() || undefined,
       createdAt: Date.now(),
     };
     await addRepo(repo, true);
     return { repo, activeRepoId: repo.id };
   });
 
-  app.put<{ Params: { id: string }; Body: Partial<Pick<Repo, "dashboardInstallCmd" | "dashboardStartCmd">> }>(
+  app.put<{ Params: { id: string }; Body: Partial<Pick<Repo, "dashboardInstallCmd" | "dashboardStartCmd" | "previewUrl">> }>(
     "/api/repos/:id",
     async (req, reply) => {
       const repo = getRepo(req.params.id);
@@ -264,46 +270,117 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { exists: res.code === 0 && res.stdout.trim().length > 0 };
   });
 
+  async function createBranchFlow(name: string, base?: string, seedPrompt?: string): Promise<Branch> {
+    const activeRepo = getActiveRepo();
+    if (!activeRepo) throw new Error("no active repo");
+
+    const id = randomUUID().slice(0, 8);
+    const branchName = name.trim();
+    const folderSlug = slugify(branchName) || id;
+    const port = allocatePort();
+
+    const branch: Branch = {
+      id,
+      name: branchName,
+      repoId: activeRepo.id,
+      worktreePath: "",
+      port,
+      status: "creating",
+      createdAt: Date.now(),
+    };
+    await upsertBranch(branch);
+
+    try {
+      const worktreePath = await createWorktree(folderSlug, branchName, base);
+      const sbName = sandboxName(folderSlug);
+      await createSandbox(sbName, worktreePath);
+      await startSandbox(sbName, worktreePath, port, seedPrompt);
+      await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
+    } catch (err) {
+      // Drop the placeholder record instead of leaving an empty "error"
+      // row behind — retries would otherwise accumulate duplicates.
+      await removeBranch(id).catch(() => {});
+      throw err;
+    }
+
+    const created = getBranch(id);
+    if (!created) throw new Error("branch vanished after create");
+    return created;
+  }
+
   app.post<{ Body: { name: string; base?: string } }>(
     "/api/branches",
     async (req, reply) => {
       const { name, base } = req.body ?? ({} as any);
       if (!name) return reply.code(400).send({ error: "name required" });
-      const activeRepo = getActiveRepo();
-      if (!activeRepo) return reply.code(400).send({ error: "no active repo" });
-
-      const id = randomUUID().slice(0, 8);
-      const branchName = name.trim();
-      const folderSlug = slugify(branchName) || id;
-      const port = allocatePort();
-
-      const branch: Branch = {
-        id,
-        name: branchName,
-        repoId: activeRepo.id,
-        worktreePath: "",
-        port,
-        status: "creating",
-        createdAt: Date.now(),
-      };
-      await upsertBranch(branch);
-
       try {
-        const worktreePath = await createWorktree(folderSlug, branchName, base);
-        const sbName = sandboxName(folderSlug);
-        await createSandbox(sbName, worktreePath);
-        await startSandbox(sbName, worktreePath, port);
-        await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
+        const branch = await createBranchFlow(name, base);
+        const repo = getActiveRepo();
+        if (repo) await ensureSession(repo.name, branch.name);
+        return branch;
       } catch (err: any) {
-        // Drop the placeholder record instead of leaving an empty "error"
-        // row behind — retries would otherwise accumulate duplicates.
-        await removeBranch(id).catch(() => {});
         return reply.code(500).send({ error: err.message });
       }
-
-      return getBranch(id);
     }
   );
+
+  app.post<{ Body: { command: string } }>("/api/commands", async (req, reply) => {
+    const raw = (req.body?.command ?? "").trim();
+    if (!raw.startsWith("/")) {
+      return reply.code(400).send({ error: "command must start with /" });
+    }
+    const [head, ...rest] = raw.slice(1).split(/\s+/);
+    const verb = (head || "").toLowerCase();
+
+    if (verb === "branch") {
+      const name = rest[0];
+      const base = rest[1];
+      if (!name) return reply.code(400).send({ error: "/branch <name> [base]" });
+      try {
+        const branch = await createBranchFlow(name, base);
+        const repo = getActiveRepo();
+        if (repo) await createSession({ repo: repo.name, branch: branch.name });
+        return { kind: "branch", branch };
+      } catch (err: any) {
+        return reply.code(500).send({ error: err.message });
+      }
+    }
+
+    if (verb === "gh-issue") {
+      const url = rest[0];
+      if (!url) return reply.code(400).send({ error: "/gh-issue <url>" });
+      const m = url.match(/github\.com\/[^/]+\/[^/]+\/issues\/(\d+)/);
+      const branchName = m ? `issue-${m[1]}` : `issue-${Date.now()}`;
+      const seedPrompt = `Please implement the following GitHub issue: ${url}\n\nRead the issue, plan the change, implement it, and commit when done.`;
+      try {
+        const branch = await createBranchFlow(branchName, undefined, seedPrompt);
+        const repo = getActiveRepo();
+        if (repo) await createSession({ repo: repo.name, branch: branch.name, issueUrl: url });
+        return { kind: "issue", branch };
+      } catch (err: any) {
+        return reply.code(500).send({ error: err.message });
+      }
+    }
+
+    if (verb === "linear") {
+      const url = rest[0];
+      if (!url) return reply.code(400).send({ error: "/linear <url>" });
+      const m = url.match(/linear\.app\/[^/]+\/issue\/([A-Za-z]+-\d+)/);
+      if (!m) return reply.code(400).send({ error: "not a Linear issue URL" });
+      const branchName = m[1].toLowerCase();
+      const seedPrompt = `Please implement the following Linear issue: ${url}\n\nRead the ticket (use the Linear MCP server if available, or ask me for the details), plan the change, implement it, and commit when done.`;
+      try {
+        const branch = await createBranchFlow(branchName, undefined, seedPrompt);
+        const repo = getActiveRepo();
+        if (repo) await createSession({ repo: repo.name, branch: branch.name, linearUrl: url });
+        return { kind: "linear", branch };
+      } catch (err: any) {
+        return reply.code(500).send({ error: err.message });
+      }
+    }
+
+    return reply.code(400).send({ error: `unknown command: /${verb}` });
+  });
 
   app.post<{ Params: { id: string } }>("/api/branches/:id/toggle", async (req, reply) => {
     let branch = getBranch(req.params.id);
@@ -331,6 +408,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await createSandbox(sbName, worktreePath);
         await startSandbox(sbName, worktreePath, port);
         await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
+        await ensureSession(activeRepo.name, gitName);
       } catch (err: any) {
         await removeBranch(id).catch(() => {});
         return reply.code(500).send({ error: err.message });
@@ -391,35 +469,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/branches/:id/create-pr", async (req, reply) => {
-    const branch = getBranch(req.params.id);
-    if (!branch) return reply.code(404).send({ error: "not found" });
-    if (isTrunk(branch)) return reply.code(400).send({ error: "cannot create PR for trunk" });
-    if (!branch.worktreePath) return reply.code(400).send({ error: "no worktree" });
-
-    try {
-      await runOrThrow("git", ["push", "-u", "origin", branch.name], { cwd: branch.worktreePath });
-    } catch (err: any) {
-      return reply.code(500).send({ error: `git push failed: ${err.message}` });
-    }
-
-    const existing = await run("gh", ["pr", "view", "--json", "url", "--jq", ".url"], {
-      cwd: branch.worktreePath,
-    });
-    if (existing.code === 0 && existing.stdout.trim()) {
-      const url = existing.stdout.trim();
-      await updateBranch(branch.id, { prUrl: url });
-      return { url };
-    }
-
-    try {
-      const url = (await runOrThrow("gh", ["pr", "create", "--fill"], { cwd: branch.worktreePath })).trim();
-      await updateBranch(branch.id, { prUrl: url });
-      return { url };
-    } catch (err: any) {
-      return reply.code(500).send({ error: `gh pr create failed: ${err.message}` });
-    }
-  });
+  app.get("/api/sessions", async () => ({ sessions: await listSessions() }));
 
   app.post<{ Params: { id: string } }>("/api/branches/:id/start-dashboard", async (req, reply) => {
     const branch = getBranch(req.params.id);

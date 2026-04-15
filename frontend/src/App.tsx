@@ -5,26 +5,22 @@ import {
   Box,
   Button,
   Code,
-  Dialog,
-  Field,
   Flex,
   HStack,
   Heading,
   Input,
-  NativeSelect,
   Portal,
   Spinner,
   Stack,
-  Table,
   Text,
   Tooltip,
-  useClipboard,
+  useBreakpointValue,
   useDisclosure,
 } from "@chakra-ui/react";
-import { api, Branch, Repo, Settings } from "./api";
+import { api, Branch, Repo, Session, Settings } from "./api";
 import { SettingsModal } from "./SettingsModal";
-import { TerminalModal, TerminalKind } from "./TerminalModal";
 import { RepoSwitcher } from "./RepoSwitcher";
+import { TerminalModal, TerminalKind } from "./TerminalModal";
 import { Welcome } from "./Welcome";
 import { toaster } from "./Toaster";
 
@@ -36,14 +32,8 @@ export function App() {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [activeRepoId, setActiveRepoId] = useState<string | undefined>();
   const settingsDisclosure = useDisclosure();
-  const createDisclosure = useDisclosure();
-  const [name, setName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("trunk");
-  const [gitBranches, setGitBranches] = useState<string[]>([]);
   const [terminalPanel, setTerminalPanel] = useState<{ branch: Branch; kind: TerminalKind } | null>(null);
-  const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
-  const [panelAnimating, setPanelAnimating] = useState(false);
   const [pending, setPending] = useState<Record<string, string>>({});
 
   const withPending = useCallback(
@@ -93,28 +83,10 @@ export function App() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  useEffect(() => {
-    if (terminalPanel) {
-      const id = requestAnimationFrame(() => setTerminalOpen(true));
-      return () => cancelAnimationFrame(id);
-    }
-  }, [terminalPanel]);
-
-  useEffect(() => {
-    if (!createDisclosure.open) return;
-    api.gitBranches().then((res) => setGitBranches(res.branches)).catch(() => {});
-  }, [createDisclosure.open]);
-
-  useEffect(() => {
-    setPanelAnimating(true);
-    const t = window.setTimeout(() => setPanelAnimating(false), 260);
-    return () => window.clearTimeout(t);
-  }, [terminalOpen, terminalFullscreen]);
 
   function closeTerminal() {
-    setTerminalOpen(false);
     setTerminalFullscreen(false);
-    window.setTimeout(() => setTerminalPanel(null), 220);
+    setTerminalPanel(null);
   }
 
   function toggleFullscreen() {
@@ -128,35 +100,14 @@ export function App() {
     }
   }
 
-  function onCreate() {
-    const trimmed = name.trim();
-    if (!trimmed || nameCollides) return;
-    const body = { name: trimmed, base: baseBranch };
-    setName("");
-    createDisclosure.onClose();
-    api
-      .create(body)
-      .then(() => refresh())
-      .catch((err: any) =>
-        toaster.create({ type: "error", title: err?.message ?? "Create failed", duration: 6000 })
-      );
-    // kick off an early refresh so the "creating" row appears without waiting on the poll
-    refresh().catch(() => {});
-  }
-
-  async function onToggle(b: Branch) {
-    await withPending(b.id, b.status === "running" ? "stopping" : "starting", async () => {
-      await api.toggle(b.id);
-      await refresh();
-    });
-  }
-
   async function onPreview(b: Branch) {
     await withPending(b.id, "preview", async () => {
       await api.switch(b.id);
       setActiveId(b.id);
       await api.startDashboard(b.id);
-      window.open("http://my.localhost:3000", "_blank");
+      const repo = repos.find((r) => r.id === b.repoId);
+      const url = repo?.previewUrl?.trim() || "http://my.localhost:3000";
+      window.open(url, "_blank");
     });
   }
 
@@ -166,38 +117,99 @@ export function App() {
     });
   }
 
-  const trimmedName = name.trim();
-  const existingNames = new Set<string>([
-    ...branches.filter((b) => !b.isTrunk).map((b) => b.name),
-    ...gitBranches,
-  ]);
-  const nameCollides = !!trimmedName && existingNames.has(trimmedName);
+  const [commandText, setCommandText] = useState("");
+  const [commandBusy, setCommandBusy] = useState(false);
+  const [commandMenuIndex, setCommandMenuIndex] = useState(0);
+  const [commandInputFocused, setCommandInputFocused] = useState(false);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; branch: Branch; session?: Session } | null>(null);
 
-  const [remoteExists, setRemoteExists] = useState(false);
-  const [checkingRemote, setCheckingRemote] = useState(false);
   useEffect(() => {
-    if (!createDisclosure.open || !trimmedName || nameCollides) {
-      setRemoteExists(false);
-      setCheckingRemote(false);
+    if (!ctxMenu) return;
+    const onClick = () => setCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCtxMenu(null);
+    };
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [ctxMenu]);
+
+  useEffect(() => {
+    const load = () => api.sessions().then((r) => setSessions(r.sessions)).catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  function validateCommand(text: string): string | null {
+    if (!text.startsWith("/")) return "Commands must start with /";
+    const parts = text.split(/\s+/);
+    const verb = parts[0];
+    const known = ["/branch", "/gh-issue", "/linear"];
+    if (!known.includes(verb)) return `Unknown command: ${verb}`;
+    if (verb === "/branch") {
+      const name = parts[1];
+      if (!name) return "Usage: /branch <name> [base]";
+      if (branches.some((b) => !b.isTrunk && b.name === name)) {
+        return `Branch "${name}" already exists`;
+      }
+      return null;
+    }
+    if (verb === "/gh-issue") {
+      const url = parts[1];
+      if (!url) return "Usage: /gh-issue <url>";
+      const m = url.match(/github\.com\/[^/]+\/[^/]+\/issues\/(\d+)/);
+      if (!m) return "Not a GitHub issue URL";
+      if (sessions.some((s) => s.issueUrl === url && !s.completedAt)) {
+        return "Already running for this issue";
+      }
+      const derivedName = `issue-${m[1]}`;
+      if (branches.some((b) => !b.isTrunk && b.name === derivedName)) {
+        return `Branch "${derivedName}" already exists`;
+      }
+      return null;
+    }
+    if (verb === "/linear") {
+      const url = parts[1];
+      if (!url) return "Usage: /linear <url>";
+      const m = url.match(/linear\.app\/[^/]+\/issue\/([A-Za-z]+-\d+)/);
+      if (!m) return "Not a Linear issue URL";
+      if (sessions.some((s) => s.linearUrl === url && !s.completedAt)) {
+        return "Already running for this ticket";
+      }
+      const derivedName = m[1].toLowerCase();
+      if (branches.some((b) => !b.isTrunk && b.name === derivedName)) {
+        return `Branch "${derivedName}" already exists`;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  async function onRunCommand() {
+    const text = commandText.trim();
+    if (!text || commandBusy) return;
+    const error = validateCommand(text);
+    if (error) {
+      toaster.create({ type: "error", title: error, duration: 4000 });
       return;
     }
-    let cancelled = false;
-    const handle = window.setTimeout(async () => {
-      setCheckingRemote(true);
-      try {
-        const res = await api.remoteBranchExists(trimmedName);
-        if (!cancelled) setRemoteExists(res.exists);
-      } catch {
-        if (!cancelled) setRemoteExists(false);
-      } finally {
-        if (!cancelled) setCheckingRemote(false);
-      }
-    }, 400);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [trimmedName, nameCollides, createDisclosure.open]);
+    setCommandBusy(true);
+    try {
+      await api.command(text);
+      setCommandText("");
+      await refresh();
+      api.sessions().then((r) => setSessions(r.sessions)).catch(() => {});
+    } catch (err: any) {
+      toaster.create({ type: "error", title: err?.message ?? "Command failed", duration: 6000 });
+    } finally {
+      setCommandBusy(false);
+    }
+  }
 
   async function onDelete(b: Branch) {
     if (!confirm(`Delete branch "${b.name}"? Worktree will be removed.`)) return;
@@ -218,220 +230,449 @@ export function App() {
     );
   }
 
+  // Backend cap counts only sandbox VMs; trunk runs as a dashboard process and
+  // isn't a sandbox. Display-side we add 1 so the user sees trunk included in
+  // the totals.
+  const sandboxCap = settings?.maxConcurrentSandboxes ?? 9;
+  const cap = sandboxCap + 1;
+  const runningCount = branches.filter((b) => b.status === "running").length;
+  const runningSandboxCount = branches.filter((b) => !b.isTrunk && b.status === "running").length;
+  const atCap = runningSandboxCount >= sandboxCap;
+  const trunk = branches.find((b) => b.isTrunk);
+  const activeRepoName = repos.find((r) => r.id === activeRepoId)?.name;
+  const sessionTasks: Task[] = sessions
+    .filter((s) => !activeRepoName || s.repo === activeRepoName)
+    .map((s) => ({
+      session: s,
+      branch: branches.find((b) => !b.isTrunk && b.name === s.branch),
+    }))
+    // Hide archived rows — once the branch is gone, the task is gone too.
+    .filter((t) => !!t.branch)
+    .sort((a, b) => (a.branch?.name ?? "").localeCompare(b.branch?.name ?? ""));
+  const tasks: Task[] = trunk ? [{ branch: trunk }, ...sessionTasks] : sessionTasks;
+
+  // On narrow viewports we show one column at a time: task list by default,
+  // terminal fullscreen when a task is selected. Back = close the terminal.
+  const isMobile = useBreakpointValue({ base: true, md: false }) ?? false;
+  const showLeft = !isMobile || !terminalPanel;
+  const showRight = !isMobile || !!terminalPanel;
+
+  async function onSelectTask(b: Branch) {
+    const needsStart = !b.isTrunk && (b.status === "stopped" || b.status === "error");
+    if (needsStart) {
+      await withPending(b.id, "starting", async () => {
+        await api.toggle(b.id);
+        await refresh();
+      });
+    }
+    openBranchTerminal(b);
+  }
+
+  function openBranchTerminal(b: Branch) {
+    if (terminalPanel && terminalPanel.branch.id === b.id) return;
+    setTerminalPanel({ branch: b, kind: "claude" });
+  }
+
+  async function onAddRepo() {
+    try {
+      const picked = await api.pickFolder();
+      if (!picked) return;
+      await api.addRepo({ linkTarget: picked.path });
+      await refreshRepos();
+      await refresh();
+    } catch (err: any) {
+      toaster.create({ type: "error", title: err?.message ?? "Add repo failed", duration: 6000 });
+    }
+  }
+
+
+  const COMMAND_MENU: { usage: string; prefix: string; desc: string }[] = [
+    { usage: "/branch <name> [base]", prefix: "/branch ", desc: "start a blank sandbox" },
+    { usage: "/gh-issue <url>", prefix: "/gh-issue ", desc: "Claude implements a GitHub issue" },
+    { usage: "/linear <url>", prefix: "/linear ", desc: "Claude implements a Linear issue" },
+  ];
+  const commandMenuOpen =
+    commandInputFocused && commandText.startsWith("/") && !commandText.includes(" ");
+  const commandMenuItems = commandMenuOpen
+    ? COMMAND_MENU.filter((c) => c.prefix.trim().startsWith(commandText))
+    : [];
+  const clampedMenuIndex =
+    commandMenuItems.length === 0
+      ? 0
+      : Math.min(commandMenuIndex, commandMenuItems.length - 1);
+
+  function pickCommand(prefix: string) {
+    setCommandText(prefix);
+    setCommandMenuIndex(0);
+  }
+
   return (
     <Flex w="100vw" h="100vh" overflow="hidden" direction="row">
-      <Box
-        flex={terminalOpen ? "1 1 50%" : "1 1 auto"}
-        minW={0}
-        maxW={terminalOpen ? "none" : "1100px"}
-        mx={terminalOpen ? 0 : "auto"}
-        px={6}
-        py={6}
-        w="100%"
-        overflowX={panelAnimating ? "hidden" : "auto"}
-        overflowY={panelAnimating ? "hidden" : "auto"}
-        transition="flex-basis 260ms ease"
+      <Flex
+        direction="column"
+        w={{ base: "100%", md: "440px" }}
+        minW={{ base: 0, md: "440px" }}
+        h="100%"
+        borderRightWidth={{ base: 0, md: 1 }}
+        borderColor="gray.700"
+        overflow="hidden"
+        display={showLeft ? "flex" : "none"}
       >
-        <Flex
-          justify="space-between"
-          align="center"
-          mb={5}
-          gap={4}
-          flexWrap="nowrap"
-          minH="40px"
-          overflow="hidden"
-        >
-          <HStack gap={3} minW={0} flexShrink={1}>
-            <Heading size="md" flexShrink={0} whiteSpace="nowrap">
+        <Box px={4} h="64px" borderBottomWidth={1} borderColor="gray.800" display="flex" alignItems="center">
+          <Flex align="center" gap={2} flex="1">
+            <Heading size="sm" flexShrink={0} whiteSpace="nowrap">
               Calypso Multi-Agent
             </Heading>
-            <RepoSwitcher
-              repos={repos}
-              activeRepoId={activeRepoId}
-              onChanged={async () => {
-                setBranchesLoaded(false);
-                setBranches([]);
-                await refreshRepos();
-                await refresh();
-              }}
-            />
-          </HStack>
-          <HStack gap={2} flexShrink={0} flexWrap="nowrap">
-            <Button
-              colorPalette="blue"
-              size="sm"
-              disabled={!activeRepoId}
-              onClick={createDisclosure.onOpen}
-            >
-              Add branch
-            </Button>
-            <Button variant="outline" size="sm" onClick={settingsDisclosure.onOpen}>
-              Settings
-            </Button>
-          </HStack>
+            <Box minW={0} maxW="140px" flexShrink={1}>
+              <RepoSwitcher
+                repos={repos}
+                activeRepoId={activeRepoId}
+                onChanged={async () => {
+                  setBranchesLoaded(false);
+                  setBranches([]);
+                  await refreshRepos();
+                  await refresh();
+                }}
+              />
+            </Box>
+            <Tooltip.Root openDelay={300}>
+              <Tooltip.Trigger asChild>
+                <Button
+                  aria-label="Settings"
+                  variant="ghost"
+                  size="xs"
+                  px={1}
+                  flexShrink={0}
+                  ml="auto"
+                  onClick={settingsDisclosure.onOpen}
+                >
+                  <GearIcon />
+                </Button>
+              </Tooltip.Trigger>
+              <Portal>
+                <Tooltip.Positioner>
+                  <Tooltip.Content>Settings</Tooltip.Content>
+                </Tooltip.Positioner>
+              </Portal>
+            </Tooltip.Root>
+          </Flex>
+        </Box>
+
+        <Box flex="1" overflowY="auto" px={4} py={3}>
+          {!branchesLoaded ? (
+            <HStack justify="center" gap={3} py={10} color="gray.500">
+              <Spinner size="sm" />
+              <Text>Loading…</Text>
+            </HStack>
+          ) : tasks.length === 0 ? (
+            <Box p={6} textAlign="center" color="gray.400" borderWidth={1} borderColor="gray.700" borderRadius="md">
+              No tasks yet. Use <Code fontSize="xs">/issue</Code> or <Code fontSize="xs">/branch</Code> below.
+            </Box>
+          ) : (
+            <Stack gap={2}>
+              {tasks.map((t) => (
+                <TaskRow
+                  key={t.session?.id ?? t.branch?.id ?? "task"}
+                  task={t}
+                  isSelected={!!t.branch && terminalPanel?.branch.id === t.branch.id}
+                  pending={t.branch ? pending[t.branch.id] : undefined}
+                  onSelect={() => t.branch && onSelectTask(t.branch)}
+                  onContextMenu={(e, branch) => {
+                    e.preventDefault();
+                    setCtxMenu({ x: e.clientX, y: e.clientY, branch, session: t.session });
+                  }}
+                />
+              ))}
+            </Stack>
+          )}
+        </Box>
+
+        <Flex justify="flex-end" px={4} py={1}>
+          <Tooltip.Root openDelay={300}>
+            <Tooltip.Trigger asChild>
+              <Text
+                fontSize="2xs"
+                color={runningCount >= cap ? "orange.400" : "gray.600"}
+                fontVariantNumeric="tabular-nums"
+              >
+                {runningCount}/{cap} running
+              </Text>
+            </Tooltip.Trigger>
+            <Portal>
+              <Tooltip.Positioner>
+                <Tooltip.Content>Running sandboxes / concurrency cap</Tooltip.Content>
+              </Tooltip.Positioner>
+            </Portal>
+          </Tooltip.Root>
         </Flex>
 
-        {!branchesLoaded ? (
-          <Box
-            p={10}
-            textAlign="center"
-            color="gray.500"
-            borderWidth={1}
-            borderColor="gray.700"
-            borderRadius="md"
-          >
-            <HStack justify="center" gap={3}>
-              <Spinner size="sm" />
-              <Text>Loading branches…</Text>
-            </HStack>
-          </Box>
-        ) : branches.length === 0 ? (
-          <Box p={10} textAlign="center" color="gray.400" borderWidth={1} borderColor="gray.700" borderRadius="md">
-            No branches yet. Click "Add branch" to start.
-          </Box>
-        ) : (
-          <Box borderWidth={1} borderColor="gray.700" borderRadius="md" overflowX="auto">
-            <Table.Root size="sm" variant="line">
-              <Table.Header bg="gray.800">
-                <Table.Row>
-                  <Table.ColumnHeader color="gray.400">Branch</Table.ColumnHeader>
-                  <Table.ColumnHeader color="gray.400">Status</Table.ColumnHeader>
-                  <Table.ColumnHeader color="gray.400">Tools</Table.ColumnHeader>
-                  <Table.ColumnHeader color="gray.400">Lifecycle</Table.ColumnHeader>
-                </Table.Row>
-              </Table.Header>
-              <Table.Body>
-                {branches.map((b) => (
-                  <BranchRow
-                    key={b.id}
-                    branch={b}
-                    isActive={b.id === activeId}
-                    pending={pending[b.id]}
-                    openTerminalKind={
-                      terminalPanel && terminalPanel.branch.id === b.id ? terminalPanel.kind : undefined
-                    }
-                    onToggle={onToggle}
-                    onPreview={onPreview}
-                    onDelete={onDelete}
-                    onOpenEditor={onOpenEditor}
-                    onOpenTerminal={(kind) => {
-                      if (terminalPanel && terminalPanel.branch.id === b.id) {
-                        closeTerminal();
-                      } else {
-                        setTerminalPanel({ branch: b, kind });
-                      }
+        {activeRepoId && (
+          <Box px={4} py={3} borderTopWidth={1} borderColor="gray.800">
+            <Stack gap={2}>
+              <Box position="relative">
+                {commandMenuItems.length > 0 && (
+                  <Box
+                    position="absolute"
+                    left={0}
+                    right={0}
+                    bottom="100%"
+                    mb={1}
+                    borderWidth={1}
+                    borderColor="gray.700"
+                    borderRadius="md"
+                    bg="gray.900"
+                    boxShadow="lg"
+                    overflow="hidden"
+                    zIndex={10}
+                  >
+                    {commandMenuItems.map((item, i) => (
+                      <Box
+                        key={item.prefix}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          pickCommand(item.prefix);
+                        }}
+                        onMouseEnter={() => setCommandMenuIndex(i)}
+                        px={3}
+                        py={2}
+                        cursor="pointer"
+                        bg={i === clampedMenuIndex ? "gray.800" : undefined}
+                      >
+                        <HStack gap={2} justify="space-between">
+                          <Code fontSize="xs" colorPalette="gray">
+                            {item.usage}
+                          </Code>
+                          <Text fontSize="xs" color="gray.500">
+                            {item.desc}
+                          </Text>
+                        </HStack>
+                      </Box>
+                    ))}
+                  </Box>
+                )}
+                <HStack gap={2}>
+                  <Input
+                    size="sm"
+                    fontFamily="mono"
+                    placeholder={atCap ? "At sandbox cap — stop one to run more" : "Type / for commands"}
+                    value={commandText}
+                    onFocus={() => setCommandInputFocused(true)}
+                    onBlur={() => setCommandInputFocused(false)}
+                    onChange={(e) => {
+                      setCommandText(e.target.value);
+                      setCommandMenuIndex(0);
                     }}
+                    onKeyDown={(e) => {
+                      if (commandMenuItems.length > 0) {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setCommandMenuIndex((i) => (i + 1) % commandMenuItems.length);
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setCommandMenuIndex(
+                            (i) => (i - 1 + commandMenuItems.length) % commandMenuItems.length
+                          );
+                          return;
+                        }
+                        if (e.key === "Enter" || e.key === "Tab") {
+                          e.preventDefault();
+                          pickCommand(commandMenuItems[clampedMenuIndex].prefix);
+                          return;
+                        }
+                      }
+                      if (e.key === "Enter") onRunCommand();
+                    }}
+                    disabled={commandBusy || atCap}
                   />
-                ))}
-              </Table.Body>
-            </Table.Root>
+                  <Button
+                    size="sm"
+                    colorPalette="blue"
+                    onClick={onRunCommand}
+                    loading={commandBusy}
+                    disabled={!commandText.trim() || atCap}
+                    flexShrink={0}
+                  >
+                    Run
+                  </Button>
+                </HStack>
+              </Box>
+            </Stack>
           </Box>
         )}
-      </Box>
+      </Flex>
 
       <Box
-        flex={terminalOpen ? "1 1 50%" : "0 0 0"}
+        flex="1"
         minW={0}
         overflow="hidden"
-        borderLeftWidth={terminalOpen && !terminalFullscreen ? "1px" : "0"}
-        borderColor="gray.700"
-        transition="flex-basis 260ms ease, border-left-width 260ms ease"
+        display={showRight ? "block" : "none"}
         position={terminalFullscreen ? "fixed" : undefined}
         inset={terminalFullscreen ? 0 : undefined}
         zIndex={terminalFullscreen ? 100 : undefined}
+        bg="gray.950"
         css={{ viewTransitionName: "terminal-pane" }}
       >
-        {terminalPanel && (
+        {terminalPanel ? (
           <TerminalModal
             key={`${terminalPanel.branch.id}:${terminalPanel.kind}`}
             branch={terminalPanel.branch}
             kind={terminalPanel.kind}
             fullscreen={terminalFullscreen}
+            isMobile={isMobile}
             onFullscreenToggle={toggleFullscreen}
             onKindChange={(kind) =>
               setTerminalPanel((prev) => (prev ? { ...prev, kind } : prev))
             }
             onClose={closeTerminal}
+            onPreview={onPreview}
+            onOpenEditor={onOpenEditor}
           />
+        ) : (
+          <Flex h="100%" align="center" justify="center" color="gray.600" textAlign="center" px={8}>
+            <Stack gap={2} align="center">
+              <Text fontSize="sm">Select a branch on the left to see its terminal.</Text>
+              <Text fontSize="xs">Or run /gh-issue, /linear, /branch below.</Text>
+            </Stack>
+          </Flex>
         )}
       </Box>
 
-      <Dialog.Root
-        open={createDisclosure.open}
-        onOpenChange={(e) => (e.open ? createDisclosure.onOpen() : createDisclosure.onClose())}
-        placement="center"
-      >
+      {ctxMenu && (
         <Portal>
-          <Dialog.Backdrop />
-          <Dialog.Positioner>
-            <Dialog.Content>
-              <Dialog.Header>
-                <Dialog.Title>Add Branch</Dialog.Title>
-              </Dialog.Header>
-              <Dialog.Body>
-                <Stack gap={4}>
-                  <Field.Root invalid={nameCollides}>
-                    <Field.Label fontSize="xs" color="gray.400">Branch name</Field.Label>
-                    <Input
-                      autoFocus
-                      placeholder="e.g. fix/header-bug"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !nameCollides) onCreate();
-                      }}
-                    />
-                    {nameCollides && (
-                      <Field.ErrorText fontSize="xs">
-                        A branch named <Code>{trimmedName}</Code> already exists.
-                      </Field.ErrorText>
-                    )}
-                  </Field.Root>
-                  <Field.Root disabled={remoteExists}>
-                    <Field.Label fontSize="xs" color="gray.400">Base branch</Field.Label>
-                    <NativeSelect.Root>
-                      <NativeSelect.Field
-                        value={baseBranch}
-                        onChange={(e) => setBaseBranch(e.currentTarget.value)}
-                      >
-                        {gitBranches.length === 0 && <option value="trunk">trunk</option>}
-                        {gitBranches.map((b) => (
-                          <option key={b} value={b}>
-                            {b}
-                          </option>
-                        ))}
-                      </NativeSelect.Field>
-                      <NativeSelect.Indicator />
-                    </NativeSelect.Root>
-                    <Field.HelperText fontSize="xs" color="gray.500">
-                      {checkingRemote
-                        ? "Checking branch…"
-                        : remoteExists
-                        ? `"${trimmedName}" already exists on origin — it will be checked out as-is.`
-                        : "Base is used only when creating a new branch."}
-                    </Field.HelperText>
-                  </Field.Root>
-                </Stack>
-              </Dialog.Body>
-              <Dialog.Footer>
-                <HStack gap={2}>
-                  <Button variant="outline" onClick={createDisclosure.onClose}>
-                    Cancel
-                  </Button>
-                  <Button
-                    colorPalette="blue"
-                    onClick={onCreate}
-                    loading={checkingRemote}
-                    disabled={!trimmedName || nameCollides || checkingRemote}
-                  >
-                    Add
-                  </Button>
-                </HStack>
-              </Dialog.Footer>
-            </Dialog.Content>
-          </Dialog.Positioner>
+          <Box
+            position="fixed"
+            left={`${ctxMenu.x}px`}
+            top={`${ctxMenu.y}px`}
+            zIndex={1000}
+            bg="gray.900"
+            borderWidth={1}
+            borderColor="gray.700"
+            borderRadius="md"
+            boxShadow="lg"
+            minW="160px"
+            py={1}
+          >
+            {/* Clipboard group */}
+            <Button
+              w="100%"
+              size="sm"
+              variant="ghost"
+              justifyContent="flex-start"
+              borderRadius={0}
+              _hover={{ bg: "gray.800" }}
+              onClick={async () => {
+                const b = ctxMenu.branch;
+                setCtxMenu(null);
+                try {
+                  await navigator.clipboard.writeText(b.name);
+                  toaster.create({ type: "info", title: "Copied", duration: 1500 });
+                } catch {}
+              }}
+            >
+              Copy name
+            </Button>
+
+            {/* External links group */}
+            {(ctxMenu.session?.issueUrl || ctxMenu.session?.linearUrl) && (
+              <Box borderTopWidth={1} borderColor="gray.800" my={1} />
+            )}
+            {ctxMenu.session?.issueUrl && (
+              <Button
+                w="100%"
+                size="sm"
+                variant="ghost"
+                justifyContent="flex-start"
+                borderRadius={0}
+                _hover={{ bg: "gray.800" }}
+                onClick={() => {
+                  const url = ctxMenu.session?.issueUrl;
+                  setCtxMenu(null);
+                  if (url) window.open(url, "_blank");
+                }}
+              >
+                Open issue
+              </Button>
+            )}
+            {ctxMenu.session?.linearUrl && (
+              <Button
+                w="100%"
+                size="sm"
+                variant="ghost"
+                justifyContent="flex-start"
+                borderRadius={0}
+                _hover={{ bg: "gray.800" }}
+                onClick={() => {
+                  const url = ctxMenu.session?.linearUrl;
+                  setCtxMenu(null);
+                  if (url) window.open(url, "_blank");
+                }}
+              >
+                Open in Linear
+              </Button>
+            )}
+
+            {/* Branch actions group */}
+            <Box borderTopWidth={1} borderColor="gray.800" my={1} />
+            <Button
+              w="100%"
+              size="sm"
+              variant="ghost"
+              justifyContent="flex-start"
+              borderRadius={0}
+              _hover={{ bg: "gray.800" }}
+              disabled={ctxMenu.branch.status !== "running"}
+              onClick={() => {
+                const b = ctxMenu.branch;
+                setCtxMenu(null);
+                onPreview(b);
+              }}
+            >
+              Preview
+            </Button>
+            <Button
+              w="100%"
+              size="sm"
+              variant="ghost"
+              justifyContent="flex-start"
+              borderRadius={0}
+              _hover={{ bg: "gray.800" }}
+              disabled={!ctxMenu.branch.worktreePath}
+              onClick={() => {
+                const b = ctxMenu.branch;
+                setCtxMenu(null);
+                onOpenEditor(b);
+              }}
+            >
+              Open in editor
+            </Button>
+
+            {/* Destructive group */}
+            {!ctxMenu.branch.isTrunk && (
+              <>
+                <Box borderTopWidth={1} borderColor="gray.800" my={1} />
+                <Button
+                  w="100%"
+                  size="sm"
+                  variant="ghost"
+                  colorPalette="red"
+                  justifyContent="flex-start"
+                  borderRadius={0}
+                  _hover={{ bg: "red.900" }}
+                  onClick={() => {
+                    const b = ctxMenu.branch;
+                    setCtxMenu(null);
+                    onDelete(b);
+                  }}
+                >
+                  Delete
+                </Button>
+              </>
+            )}
+          </Box>
         </Portal>
-      </Dialog.Root>
+      )}
 
       <SettingsModal
         open={settingsDisclosure.open}
@@ -439,16 +680,8 @@ export function App() {
         firstRun={repos.length === 0}
         onClose={settingsDisclosure.onClose}
         onAddRepo={async () => {
-          try {
-            const picked = await api.pickFolder();
-            if (!picked) return;
-            await api.addRepo({ linkTarget: picked.path });
-            await refreshRepos();
-            await refresh();
-            settingsDisclosure.onClose();
-          } catch (e: any) {
-            toaster.create({ type: "error", title: e.message, duration: 6000 });
-          }
+          await onAddRepo();
+          settingsDisclosure.onClose();
         }}
         onSaved={async () => {
           await refreshRepos();
@@ -458,163 +691,107 @@ export function App() {
   );
 }
 
-function ExternalIcon() {
+function GearIcon() {
   return (
     <svg
-      width="11"
-      height="11"
+      width="14"
+      height="14"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2.5"
+      strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <path d="M7 17L17 7" />
-      <path d="M7 7h10v10" />
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
     </svg>
   );
 }
 
-interface BranchRowProps {
-  branch: Branch;
-  isActive: boolean;
-  pending?: string;
-  openTerminalKind?: TerminalKind;
-  onToggle: (b: Branch) => void;
-  onPreview: (b: Branch) => void;
-  onDelete: (b: Branch) => void;
-  onOpenEditor: (b: Branch) => void;
-  onOpenTerminal: (kind: TerminalKind) => void;
+interface Task {
+  session?: Session;
+  branch?: Branch;
 }
 
-function BranchRow({
-  branch: b,
-  isActive,
-  pending: p,
-  openTerminalKind,
-  onToggle,
-  onPreview,
-  onDelete,
-  onOpenEditor,
-  onOpenTerminal,
-}: BranchRowProps) {
-  const busy = !!p && p !== "preview";
-  const running = b.status === "running";
-  const clipboard = useClipboard({ value: b.name });
 
-  const handleCopy = () => {
-    clipboard.copy();
-    toaster.create({
-      type: "info",
-      title: "Copied",
-      duration: 1500,
-    });
-  };
+interface TaskRowProps {
+  task: Task;
+  isSelected: boolean;
+  pending?: string;
+  onSelect: () => void;
+  onContextMenu: (e: React.MouseEvent, branch: Branch) => void;
+}
 
-  const statusPalette = running
-    ? "green"
-    : b.status === "error"
-    ? "red"
-    : b.status === "creating" || b.status === "starting"
-    ? "blue"
-    : "gray";
+function TaskRow({ task, isSelected, pending, onSelect, onContextMenu }: TaskRowProps) {
+  const { session: s, branch: b } = task;
+  const archived = !b;
+  const deleting = pending === "deleting";
+  const name = b?.name ?? s?.branch ?? "(unknown)";
 
   return (
-    <Table.Row>
-      <Table.Cell>
-        <HStack gap={2}>
-          <Tooltip.Root openDelay={300}>
-            <Tooltip.Trigger asChild>
-              <Code
-                colorPalette="gray"
-                cursor="pointer"
-                onClick={handleCopy}
-                px={3}
-                py={1}
-                borderRadius="md"
-                borderWidth="1px"
-                bg={isActive ? "gray.solid" : undefined}
-                color={isActive ? "gray.contrast" : undefined}
-                borderColor={isActive ? "gray.solid" : "gray.700"}
-                maxW="240px"
-                whiteSpace="nowrap"
-                overflow="hidden"
-                textOverflow="ellipsis"
-                display="inline-block"
-                _hover={{ bg: isActive ? "gray.solid" : "gray.700", borderColor: isActive ? "gray.solid" : "gray.600" }}
-                transition="background 120ms, border-color 120ms"
-              >
-                {b.name}
-              </Code>
-            </Tooltip.Trigger>
-            <Portal>
-              <Tooltip.Positioner>
-                <Tooltip.Content>{b.name}</Tooltip.Content>
-              </Tooltip.Positioner>
-            </Portal>
-          </Tooltip.Root>
-        </HStack>
-      </Table.Cell>
-      <Table.Cell>
-        <Badge colorPalette={statusPalette} textTransform="uppercase">{p || b.status}</Badge>
-      </Table.Cell>
-      <Table.Cell>
-        <HStack gap={2}>
-          <Button
-            size="xs"
-            disabled={busy || !running || (!b.sandboxName && !b.isTrunk)}
-            colorPalette="gray"
-            variant={openTerminalKind ? "solid" : "outline"}
-            onClick={() => onOpenTerminal("claude")}
-          >
-            Shell
-          </Button>
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={busy || !b.worktreePath}
-            loading={p === "editor"}
-            onClick={() => onOpenEditor(b)}
-          >
-            Open in Editor <ExternalIcon />
-          </Button>
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={busy || b.status !== "running"}
-            loading={p === "preview"}
-            onClick={() => onPreview(b)}
-          >
-            Visit <ExternalIcon />
-          </Button>
-        </HStack>
-      </Table.Cell>
-      <Table.Cell>
-        {!b.isTrunk && (
-          <HStack gap={2}>
-            {running ? (
-              <Button size="xs" variant="outline" disabled={busy} loading={p === "stopping"} onClick={() => onToggle(b)}>
-                Stop
-              </Button>
-            ) : (
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={busy || b.status === "creating"}
-                loading={p === "starting"}
-                onClick={() => onToggle(b)}
-              >
-                Start
-              </Button>
-            )}
-            <Button size="xs" colorPalette="red" disabled={busy} loading={p === "deleting"} onClick={() => onDelete(b)}>
-              Delete
-            </Button>
+    <Box
+      as="button"
+      type="button"
+      tabIndex={archived || deleting ? -1 : 0}
+      disabled={archived || deleting}
+      onClick={archived || deleting ? undefined : onSelect}
+      onKeyDown={(e) => {
+        if (archived || deleting) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      onContextMenu={(e) => {
+        if (!b || deleting) return;
+        onContextMenu(e, b);
+      }}
+      cursor={archived || deleting ? "default" : "pointer"}
+      borderWidth={1}
+      borderColor={isSelected ? "blue.500" : "gray.700"}
+      bg={isSelected ? "gray.800" : undefined}
+      opacity={deleting ? 0.4 : archived ? 0.6 : 1}
+      borderRadius="md"
+      px={4}
+      py={4}
+      textAlign="left"
+      w="100%"
+      _hover={{ borderColor: deleting ? "gray.700" : archived ? "gray.700" : isSelected ? "blue.400" : "gray.500" }}
+      _focusVisible={{
+        outline: "none",
+        borderColor: "blue.400",
+        boxShadow: "0 0 0 1px var(--chakra-colors-blue-400)",
+      }}
+      transition="border-color 120ms, background 120ms, opacity 120ms"
+    >
+      <Flex align="center" gap={2} minW={0}>
+        <Text
+          fontFamily="mono"
+          fontSize="sm"
+          fontWeight="semibold"
+          whiteSpace="nowrap"
+          overflow="hidden"
+          textOverflow="ellipsis"
+          flex="1"
+          minW={0}
+        >
+          {name}
+        </Text>
+        {deleting ? (
+          <HStack gap={1} flexShrink={0}>
+            <Spinner size="xs" />
+            <Text fontSize="2xs" color="gray.500">deleting…</Text>
           </HStack>
+        ) : (
+          b?.isTrunk && (
+            <Badge colorPalette="purple" variant="subtle" fontSize="2xs" flexShrink={0}>
+              Dashboard
+            </Badge>
+          )
         )}
-      </Table.Cell>
-    </Table.Row>
+      </Flex>
+    </Box>
   );
 }

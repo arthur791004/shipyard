@@ -35,4 +35,7 @@ export const config = {
   claudeSandboxDir: process.env.CLAUDE_SANDBOX_DIR ?? path.join(os.homedir(), ".claude-sandbox"),
   portRangeStart: 4001,
   portRangeEnd: 4999,
+  maxConcurrentSandboxes: Number(process.env.MAX_SANDBOXES ?? 9),
+  sandboxIdleMs: Number(process.env.SANDBOX_IDLE_MS ?? 30 * 60 * 1000),
+  idleSweeperIntervalMs: Number(process.env.SANDBOX_IDLE_CHECK_MS ?? 60 * 1000),
 };

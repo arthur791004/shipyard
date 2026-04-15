@@ -8,15 +8,23 @@ import {
   loadState,
   getActiveBranchId,
   getBranch,
+  getRepo,
   listAllBranches,
   updateBranch,
   getActiveRepo,
   trunkBranchId,
   isTrunk,
 } from "./state.js";
+import { ensureSession } from "./sessions.js";
 import { registerRoutes } from "./routes.js";
 import { registerTerminal } from "./terminal.js";
-import { reconcileSandboxState, startSandbox } from "./docker.js";
+import {
+  reconcileSandboxState,
+  runningSandboxNames,
+  sandboxLastActivity,
+  startSandbox,
+  stopSandbox,
+} from "./docker.js";
 import { ensureDashboardRunning } from "./dashboard.js";
 
 async function main() {
@@ -56,6 +64,10 @@ async function main() {
 
   for (const branch of listAllBranches()) {
     if (isTrunk(branch)) continue;
+    // Backfill a session for every non-trunk branch so the unified task list
+    // surfaces anything created before sessions existed.
+    const repo = getRepo(branch.repoId);
+    if (repo) await ensureSession(repo.name, branch.name).catch(() => {});
     if (branch.status !== "running") continue;
     if (branch.sandboxName) {
       try {
@@ -127,6 +139,53 @@ async function main() {
   } catch (err) {
     app.log.error({ err }, `failed to bind branch proxy on :${config.branchProxyPort}`);
   }
+
+  startIdleSandboxSweeper(app.log);
+}
+
+// Periodically stop idle sandboxes and flag stuck creates.
+//
+// Two sweeps on the same tick:
+//  1. Idle stop — running PTY with no activity for > sandboxIdleMs.
+//  2. Stuck create — branch sitting in status="creating" for > 5 min,
+//     including branches orphaned by a mid-create backend crash. Marked
+//     as "error" so the user can see and delete them.
+//
+// Trunks are skipped in both passes.
+function startIdleSandboxSweeper(log: { info: (msg: string) => void; error: (obj: unknown, msg?: string) => void }) {
+  const idleMs = config.sandboxIdleMs;
+  const stuckCreateMs = 5 * 60 * 1000;
+  if (idleMs <= 0) return;
+  const interval = setInterval(async () => {
+    const now = Date.now();
+
+    for (const name of runningSandboxNames()) {
+      const last = sandboxLastActivity(name);
+      if (last == null || now - last < idleMs) continue;
+      const branch = listAllBranches().find((b) => b.sandboxName === name);
+      if (!branch || isTrunk(branch)) continue;
+      log.info(`[${name}] idle >${Math.round(idleMs / 60000)}m, auto-stopping`);
+      try {
+        await stopSandbox(name, branch.worktreePath);
+        await updateBranch(branch.id, { status: "stopped" });
+      } catch (err) {
+        log.error({ err }, `idle auto-stop(${name}) failed`);
+      }
+    }
+
+    for (const branch of listAllBranches()) {
+      if (isTrunk(branch)) continue;
+      if (branch.status !== "creating") continue;
+      if (now - branch.createdAt < stuckCreateMs) continue;
+      log.info(`[${branch.id}] stuck in "creating" for >${Math.round(stuckCreateMs / 60000)}m, marking as error`);
+      try {
+        await updateBranch(branch.id, { status: "error", error: "startup stalled" });
+      } catch (err) {
+        log.error({ err }, `stuck-create flag(${branch.id}) failed`);
+      }
+    }
+  }, config.idleSweeperIntervalMs);
+  interval.unref?.();
 }
 
 main().catch((err) => {

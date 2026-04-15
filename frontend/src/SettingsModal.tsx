@@ -25,13 +25,20 @@ interface Props {
 export function SettingsModal({ open, activeRepo, firstRun, onClose, onAddRepo, onSaved }: Props) {
   const [installCmd, setInstallCmd] = useState<string>(activeRepo?.dashboardInstallCmd ?? "");
   const [startCmd, setStartCmd] = useState<string>(activeRepo?.dashboardStartCmd ?? "");
+  const [previewUrl, setPreviewUrl] = useState<string>(activeRepo?.previewUrl ?? "");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     setInstallCmd(activeRepo?.dashboardInstallCmd ?? "");
     setStartCmd(activeRepo?.dashboardStartCmd ?? "");
-  }, [activeRepo?.id, activeRepo?.dashboardInstallCmd, activeRepo?.dashboardStartCmd]);
+    setPreviewUrl(activeRepo?.previewUrl ?? "");
+  }, [
+    activeRepo?.id,
+    activeRepo?.dashboardInstallCmd,
+    activeRepo?.dashboardStartCmd,
+    activeRepo?.previewUrl,
+  ]);
 
   async function save() {
     if (!activeRepo) return;
@@ -41,6 +48,7 @@ export function SettingsModal({ open, activeRepo, firstRun, onClose, onAddRepo, 
       const next = await api.updateRepo(activeRepo.id, {
         dashboardInstallCmd: installCmd.trim(),
         dashboardStartCmd: startCmd.trim(),
+        previewUrl: previewUrl.trim(),
       });
       onSaved(next);
       onClose();
@@ -124,6 +132,21 @@ export function SettingsModal({ open, activeRepo, firstRun, onClose, onAddRepo, 
                       <Field.HelperText fontSize="xs" color="gray.500">
                         Invoked as <Code>PORT=&lt;port&gt; &lt;cmd&gt;</Code>. Leave blank for{" "}
                         <Code>yarn start-dashboard</Code>.
+                      </Field.HelperText>
+                    </Field.Root>
+                    <Field.Root>
+                      <Field.Label fontSize="xs" color="gray.400">
+                        Preview URL
+                      </Field.Label>
+                      <Input
+                        placeholder="http://my.localhost:3000"
+                        value={previewUrl}
+                        onChange={(e) => setPreviewUrl(e.target.value)}
+                        disabled={saving}
+                      />
+                      <Field.HelperText fontSize="xs" color="gray.500">
+                        Opened in a new tab when you click <Code>Visit</Code>. Leave blank for{" "}
+                        <Code>http://my.localhost:3000</Code>.
                       </Field.HelperText>
                     </Field.Root>
                   </>

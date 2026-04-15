@@ -16,7 +16,6 @@ export interface Branch {
   status: BranchStatus;
   createdAt: number;
   error?: string;
-  prUrl?: string;
 }
 
 export interface Repo {
@@ -28,6 +27,7 @@ export interface Repo {
   defaultBranch: string;
   dashboardInstallCmd?: string;
   dashboardStartCmd?: string;
+  previewUrl?: string;
   createdAt: number;
 }
 

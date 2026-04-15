@@ -29,6 +29,7 @@ export function Welcome({ onDone }: Props) {
   const [linkTarget, setLinkTarget] = useState("");
   const [installCmd, setInstallCmd] = useState("");
   const [startCmd, setStartCmd] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
   const [picking, setPicking] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -68,11 +69,14 @@ export function Welcome({ onDone }: Props) {
     setAdding(true);
     setErr(null);
     try {
-      await api.addRepo({
+      const repo = await api.addRepo({
         linkTarget,
         dashboardInstallCmd: installCmd.trim() || undefined,
         dashboardStartCmd: startCmd.trim() || undefined,
       });
+      if (previewUrl.trim()) {
+        await api.updateRepo(repo.repo.id, { previewUrl: previewUrl.trim() });
+      }
       await onDone();
     } catch (e: any) {
       setErr(e.message);
@@ -115,15 +119,19 @@ export function Welcome({ onDone }: Props) {
         {step === 0 && (
           <Stack gap={5} flex={1}>
             <Text color="gray.300">
-              Run multiple isolated Claude Code agents against different branches of one or more git
-              repos, in parallel. Each branch gets its own worktree, its own Docker sandbox with Claude
-              inside, and its own dev-server dashboard — all from a single web UI.
+              Hand Claude a GitHub issue or a Linear ticket and it gets to work in its own isolated
+              workspace. Kick off several at once and check in on any of them from one window.
             </Text>
             <Stack gap={2} color="gray.400" fontSize="sm">
-              <BulletRow>Per-branch Docker sandboxes so agents can't see each other's state.</BulletRow>
-              <BulletRow>A shared Claude login (<Code>~/.claude-sandbox</Code>) across every sandbox.</BulletRow>
-              <BulletRow>A reverse proxy at <Code>my.localhost:3000</Code> routing to the active branch.</BulletRow>
-              <BulletRow>Multi-repo support: add several repos and switch between them in the header.</BulletRow>
+              <BulletRow>
+                <Code>/gh-issue &lt;url&gt;</Code> — Claude implements a GitHub issue.
+              </BulletRow>
+              <BulletRow>
+                <Code>/linear &lt;url&gt;</Code> — Claude implements a Linear ticket.
+              </BulletRow>
+              <BulletRow>
+                <Code>/branch &lt;name&gt;</Code> — a blank workspace for anything else.
+              </BulletRow>
             </Stack>
             <Flex justify="flex-end" mt="auto">
               <Button colorPalette="blue" onClick={() => setStep(1)}>
@@ -183,9 +191,8 @@ export function Welcome({ onDone }: Props) {
             <Stack gap={1}>
               <Heading size="md">Add your first repo</Heading>
               <Text color="gray.400" fontSize="sm">
-                Pick a local git checkout. Nothing is cloned — it's symlinked under{" "}
-                <Code>.config/repo/&lt;name&gt;/&lt;default&gt;</Code> so you keep your existing{" "}
-                <Code>node_modules</Code> and caches. You can add more repos later from the header.
+                Pick your existing git checkout — no copies, no cloning, your <Code>node_modules</Code>{" "}
+                and caches stay put. Everything below is optional; you can change it later in Settings.
               </Text>
             </Stack>
 
@@ -249,6 +256,24 @@ export function Welcome({ onDone }: Props) {
               <Field.HelperText fontSize="xs" color="gray.500">
                 Invoked as <Code>PORT=&lt;port&gt; &lt;cmd&gt;</Code>. Leave blank for{" "}
                 <Code>yarn start-dashboard</Code>.
+              </Field.HelperText>
+            </Field.Root>
+
+            <Field.Root>
+              <Field.Label fontSize="xs" color="gray.400" textTransform="uppercase">
+                Preview URL
+              </Field.Label>
+              <Input
+                placeholder="http://my.localhost:3000"
+                value={previewUrl}
+                onChange={(e) => setPreviewUrl(e.target.value)}
+                disabled={adding}
+                fontFamily="mono"
+                fontSize="sm"
+              />
+              <Field.HelperText fontSize="xs" color="gray.500">
+                Opened in a new tab when you click <Code>Visit</Code> on a task. Leave blank for{" "}
+                <Code>http://my.localhost:3000</Code>.
               </Field.HelperText>
             </Field.Root>
 

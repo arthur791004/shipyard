@@ -64,7 +64,7 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged }: Props) {
   return (
     <Menu.Root>
       <Menu.Trigger asChild>
-        <Button size="sm" variant="outline" minW="200px" justifyContent="space-between">
+        <Button size="sm" variant="outline" minW="0" maxW="140px" justifyContent="space-between">
           <HStack gap={2} minW={0}>
             {busy === "activate" && <Spinner size="xs" />}
             <Text truncate fontFamily="mono" fontSize="sm">

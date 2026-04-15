@@ -8,6 +8,7 @@ import pty, { IPty } from "node-pty";
 import { run, runOrThrow } from "./shell.js";
 import { config } from "./config.js";
 import { ensureDashboardRunning, stopDashboard } from "./dashboard.js";
+import { listAllBranches, updateBranch } from "./state.js";
 
 let cachedDockerPath: string | null = null;
 
@@ -34,9 +35,18 @@ interface SandboxPty {
   term: IPty;
   buffer: string;
   subscribers: Set<(data: string) => void>;
+  lastActivity: number;
 }
 
 const runningPtys = new Map<string, SandboxPty>();
+
+export function runningSandboxNames(): string[] {
+  return [...runningPtys.keys()];
+}
+
+export function sandboxLastActivity(name: string): number | null {
+  return runningPtys.get(name)?.lastActivity ?? null;
+}
 
 const SCROLLBACK_LIMIT = 100_000;
 
@@ -50,7 +60,10 @@ export function attachSandbox(
   entry.subscribers.add(onData);
   return {
     unsubscribe: () => entry.subscribers.delete(onData),
-    write: (data: string) => entry.term.write(data),
+    write: (data: string) => {
+      entry.lastActivity = Date.now();
+      entry.term.write(data);
+    },
     resize: (cols: number, rows: number) => {
       try { entry.term.resize(cols, rows); } catch {}
     },
@@ -343,7 +356,12 @@ export async function syncClaudeConfigOut(name: string): Promise<void> {
   ]);
 }
 
-function spawnSandboxPty(name: string, worktreePath?: string, dashboardPort?: number): SandboxPty {
+function spawnSandboxPty(
+  name: string,
+  worktreePath?: string,
+  dashboardPort?: number,
+  seedPrompt?: string
+): SandboxPty {
   if (runningPtys.has(name)) return runningPtys.get(name)!;
   const dockerPath = resolveDockerPath();
   let term: IPty;
@@ -360,13 +378,30 @@ function spawnSandboxPty(name: string, worktreePath?: string, dashboardPort?: nu
       `pty.spawn ${dockerPath} sandbox run ${name} failed: ${err?.message || err}`
     );
   }
-  const entry: SandboxPty = { term, buffer: "", subscribers: new Set() };
+  const entry: SandboxPty = {
+    term,
+    buffer: "",
+    subscribers: new Set(),
+    lastActivity: Date.now(),
+  };
   term.onData((data) => {
+    entry.lastActivity = Date.now();
     entry.buffer = (entry.buffer + data).slice(-SCROLLBACK_LIMIT);
     for (const sub of entry.subscribers) sub(data);
   });
   term.onExit(() => {
     runningPtys.delete(name);
+    // If the branch is still marked as running, this exit was not initiated
+    // by our own stopSandbox path (which updates state before the kill) —
+    // something stopped the sandbox externally (e.g. `docker sandbox stop`
+    // from a shell, Docker Desktop restart, host crash-and-reboot, etc).
+    // Reflect that in state so the UI doesn't leave the row stuck at running.
+    const branch = listAllBranches().find((b) => b.sandboxName === name);
+    if (branch && branch.status === "running") {
+      updateBranch(branch.id, { status: "stopped" }).catch((err) =>
+        console.error(`updateBranch(${branch.id}) on unexpected pty exit failed:`, err)
+      );
+    }
     syncCredentialsOut(name).catch((err) =>
       console.error(`syncCredentialsOut(${name}) on pty exit failed:`, err)
     );
@@ -381,7 +416,41 @@ function spawnSandboxPty(name: string, worktreePath?: string, dashboardPort?: nu
       console.error(`ensureDashboardRunning(${worktreePath}:${dashboardPort}) failed:`, err)
     );
   }
+
+  if (seedPrompt) scheduleSeedPrompt(entry, name, seedPrompt);
   return entry;
+}
+
+// Watches the sandbox's output for quiescence (1.5s with no new chunks) and
+// then types the seed prompt into the PTY as if the user had entered it.
+// A hard 30s ceiling fires unconditionally so a chatty startup banner can't
+// keep us from ever sending. Typing matches what the user would do, so it
+// works for whatever the image's default entrypoint is.
+function scheduleSeedPrompt(entry: SandboxPty, name: string, prompt: string): void {
+  let quiesceTimer: NodeJS.Timeout | null = null;
+  let sent = false;
+
+  const send = () => {
+    if (sent) return;
+    sent = true;
+    if (quiesceTimer) clearTimeout(quiesceTimer);
+    clearTimeout(hardTimer);
+    entry.subscribers.delete(listener);
+    try {
+      entry.term.write(prompt + "\r");
+    } catch (err) {
+      console.error(`seed prompt write(${name}) failed:`, err);
+    }
+  };
+
+  const listener = () => {
+    if (sent) return;
+    if (quiesceTimer) clearTimeout(quiesceTimer);
+    quiesceTimer = setTimeout(send, 1500);
+  };
+
+  entry.subscribers.add(listener);
+  const hardTimer = setTimeout(send, 30_000);
 }
 
 // Re-establish our pty handle for a sandbox that docker still reports as
@@ -405,7 +474,12 @@ export async function reattachSandbox(
   }
 }
 
-export async function startSandbox(name: string, worktreePath?: string, dashboardPort?: number): Promise<void> {
+export async function startSandbox(
+  name: string,
+  worktreePath?: string,
+  dashboardPort?: number,
+  seedPrompt?: string
+): Promise<void> {
   if (runningPtys.has(name)) return;
   // Reconcile stale sandboxd state before touching docker — without this a
   // concurrent stop that left a zombie "running" entry would poison the
@@ -414,6 +488,14 @@ export async function startSandbox(name: string, worktreePath?: string, dashboar
   await reconcileSandboxState().catch((err) =>
     console.error(`reconcileSandboxState(${name}) failed:`, err)
   );
+  // Concurrency cap: count live PTYs we already manage. Does not count toward
+  // the cap when we're about to reattach to an already-running sandbox below.
+  const alreadyRunningInDocker = (await getSandboxStatus(name)) === "running";
+  if (!alreadyRunningInDocker && runningPtys.size >= config.maxConcurrentSandboxes) {
+    throw new Error(
+      `sandbox concurrency limit reached (${config.maxConcurrentSandboxes}) — stop another sandbox first`
+    );
+  }
   if (worktreePath && !(await sandboxExists(name))) {
     await createSandbox(name, worktreePath);
   }
@@ -433,7 +515,7 @@ export async function startSandbox(name: string, worktreePath?: string, dashboar
   } catch (err) {
     console.error(`syncClaudeConfigIn(${name}) failed:`, err);
   }
-  spawnSandboxPty(name, worktreePath, dashboardPort);
+  spawnSandboxPty(name, worktreePath, dashboardPort, seedPrompt);
 }
 
 export async function stopSandbox(name: string, worktreePath?: string): Promise<void> {
