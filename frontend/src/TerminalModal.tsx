@@ -137,24 +137,30 @@ export function TerminalModal({
         borderBottomWidth={1}
         borderColor="gray.800"
       >
-        <HStack gap={3} minW={0}>
+        <HStack gap={3} minW={0} flex="1">
           {isMobile && (
             <Button size="sm" variant="ghost" px={2} onClick={onClose} flexShrink={0}>
               ←
             </Button>
           )}
-          <Heading size="sm" truncate>{branch.name}</Heading>
+          <Heading size="sm" truncate flex="0 1 auto" minW={0}>
+            {branch.name}
+          </Heading>
           <Tabs.Root
             value={kind}
             onValueChange={(e) => onKindChange(e.value as TerminalKind)}
-            size="sm"
             variant="plain"
+            flexShrink={0}
+            css={{
+              "--tabs-indicator-bg": "colors.gray.subtle",
+              "--tabs-indicator-shadow": "shadows.xs",
+            }}
           >
-            <Tabs.List bg="bg.muted" rounded="l3" p="1">
+            <Tabs.List>
               <Tabs.Trigger value="claude">Claude</Tabs.Trigger>
               <Tabs.Trigger value="shell">Terminal</Tabs.Trigger>
               <Tabs.Trigger value="logs">Logs</Tabs.Trigger>
-              <Tabs.Indicator rounded="l2" />
+              <Tabs.Indicator />
             </Tabs.List>
           </Tabs.Root>
         </HStack>

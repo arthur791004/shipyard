@@ -257,6 +257,50 @@ export function App() {
   const showLeft = !isMobile || !terminalPanel;
   const showRight = !isMobile || !!terminalPanel;
 
+  // Resizable left column — persisted width, clamped to [280, 720] so the
+  // terminal doesn't get squeezed to nothing and the list doesn't take over
+  // the screen. Disabled on mobile (the layout is single-column anyway).
+  const LEFT_WIDTH_KEY = "calypso.leftWidth";
+  const LEFT_WIDTH_MIN = 280;
+  const LEFT_WIDTH_MAX = 720;
+  const LEFT_WIDTH_DEFAULT = 440;
+  const [leftWidth, setLeftWidth] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(LEFT_WIDTH_KEY);
+      if (!raw) return LEFT_WIDTH_DEFAULT;
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n)) return LEFT_WIDTH_DEFAULT;
+      return Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, n));
+    } catch {
+      return LEFT_WIDTH_DEFAULT;
+    }
+  });
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => {
+    if (!resizing) return;
+    const onMove = (e: MouseEvent) => {
+      const next = Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, e.clientX));
+      setLeftWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      try {
+        localStorage.setItem(LEFT_WIDTH_KEY, String(leftWidth));
+      } catch {}
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [resizing, leftWidth]);
+
   async function onSelectTask(b: Branch) {
     const needsStart = !b.isTrunk && (b.status === "stopped" || b.status === "error");
     if (needsStart) {
@@ -310,53 +354,58 @@ export function App() {
     <Flex w="100vw" h="100vh" overflow="hidden" direction="row">
       <Flex
         direction="column"
-        w={{ base: "100%", md: "440px" }}
-        minW={{ base: 0, md: "440px" }}
+        w={isMobile ? "100%" : `${leftWidth}px`}
+        minW={isMobile ? 0 : `${leftWidth}px`}
         h="100%"
-        borderRightWidth={{ base: 0, md: 1 }}
-        borderColor="gray.700"
         overflow="hidden"
         display={showLeft ? "flex" : "none"}
+        flexShrink={0}
       >
-        <Box px={4} h="64px" borderBottomWidth={1} borderColor="gray.800" display="flex" alignItems="center">
-          <Flex align="center" gap={2} flex="1">
-            <Heading size="sm" flexShrink={0} whiteSpace="nowrap">
-              Calypso Multi-Agent
-            </Heading>
-            <Box minW={0} maxW="140px" flexShrink={1}>
-              <RepoSwitcher
-                repos={repos}
-                activeRepoId={activeRepoId}
-                onChanged={async () => {
-                  setBranchesLoaded(false);
-                  setBranches([]);
-                  await refreshRepos();
-                  await refresh();
-                }}
-              />
-            </Box>
-            <Tooltip.Root openDelay={300}>
-              <Tooltip.Trigger asChild>
-                <Button
-                  aria-label="Settings"
-                  variant="ghost"
-                  size="xs"
-                  px={1}
-                  flexShrink={0}
-                  ml="auto"
-                  onClick={settingsDisclosure.onOpen}
-                >
-                  <GearIcon />
-                </Button>
-              </Tooltip.Trigger>
-              <Portal>
-                <Tooltip.Positioner>
-                  <Tooltip.Content>Settings</Tooltip.Content>
-                </Tooltip.Positioner>
-              </Portal>
-            </Tooltip.Root>
-          </Flex>
-        </Box>
+        <Flex
+          px={4}
+          h="64px"
+          borderBottomWidth={1}
+          borderColor="gray.800"
+          align="center"
+          gap={3}
+          overflow="hidden"
+          flexShrink={0}
+        >
+          <Heading size="sm" truncate flex="1" minW={0}>
+            Calypso Multi-Agent
+          </Heading>
+          <Box flexShrink={0}>
+            <RepoSwitcher
+              repos={repos}
+              activeRepoId={activeRepoId}
+              onChanged={async () => {
+                setBranchesLoaded(false);
+                setBranches([]);
+                await refreshRepos();
+                await refresh();
+              }}
+            />
+          </Box>
+          <Tooltip.Root openDelay={300}>
+            <Tooltip.Trigger asChild>
+              <Button
+                aria-label="Settings"
+                variant="ghost"
+                size="xs"
+                px={1}
+                flexShrink={0}
+                onClick={settingsDisclosure.onOpen}
+              >
+                <GearIcon />
+              </Button>
+            </Tooltip.Trigger>
+            <Portal>
+              <Tooltip.Positioner>
+                <Tooltip.Content>Settings</Tooltip.Content>
+              </Tooltip.Positioner>
+            </Portal>
+          </Tooltip.Root>
+        </Flex>
 
         <Box flex="1" overflowY="auto" px={4} py={3}>
           {!branchesLoaded ? (
@@ -502,6 +551,40 @@ export function App() {
           </Box>
         )}
       </Flex>
+
+      {!isMobile && showLeft && showRight && (
+        <Box
+          position="relative"
+          w="6px"
+          ml="-1px"
+          flexShrink={0}
+          cursor="col-resize"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            setResizing(true);
+          }}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize task list"
+          css={{
+            "&::before": {
+              content: '""',
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: "50%",
+              width: "1px",
+              transform: "translateX(-50%)",
+              background: resizing ? "var(--chakra-colors-blue-400)" : "var(--chakra-colors-gray-700)",
+              transition: "background 120ms, width 120ms",
+            },
+            "&:hover::before": {
+              width: "2px",
+              background: "var(--chakra-colors-blue-400)",
+            },
+          }}
+        />
+      )}
 
       <Box
         flex="1"
@@ -732,10 +815,9 @@ function TaskRow({ task, isSelected, pending, onSelect, onContextMenu }: TaskRow
 
   return (
     <Box
-      as="button"
-      type="button"
+      role="button"
       tabIndex={archived || deleting ? -1 : 0}
-      disabled={archived || deleting}
+      aria-disabled={archived || deleting}
       onClick={archived || deleting ? undefined : onSelect}
       onKeyDown={(e) => {
         if (archived || deleting) return;
