@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import pty, { IPty } from "node-pty";
 import { getBranch, isTrunk } from "./state.js";
-import { attachSandbox, reattachSandbox, resolveDockerPath } from "./docker.js";
+import { attachSandbox, resolveDockerPath } from "./docker.js";
 import { attachSharedPty, ensureSharedPty } from "./sharedPty.js";
 import { dashboardKey, ensureDashboardRunning } from "./dashboard.js";
 
@@ -115,14 +115,12 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
         const onData = (data: string) => {
           try { socket.send(data); } catch {}
         };
-        let handle = attachSandbox(branch.sandboxName, onData);
+        const handle = attachSandbox(branch.sandboxName, onData);
         if (!handle) {
-          // Our pty bookkeeping has nothing, but docker may still have the
-          // sandbox running — reattach without clobbering in-container state.
-          const ok = await reattachSandbox(branch.sandboxName, branch.worktreePath, branch.port);
-          if (ok) handle = attachSandbox(branch.sandboxName, onData);
-        }
-        if (!handle) {
+          // PTY is gone (Claude exited). Don't auto-spawn a new session
+          // — that would lose the user's conversation context silently.
+          // Instead close the socket so the frontend shows the status bar
+          // and the user can explicitly restart via the refresh button.
           try {
             socket.send("\r\n[sandbox not running — start the branch first]\r\n");
             socket.close();

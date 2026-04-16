@@ -568,6 +568,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return getBranch(branch.id);
     }
 
+    await updateBranch(branch.id, { status: "starting" });
     try {
       await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
       await updateBranch(branch.id, { status: "running", error: undefined });

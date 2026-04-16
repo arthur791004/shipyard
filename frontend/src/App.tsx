@@ -325,15 +325,19 @@ export function App() {
   const showLeft = !isMobile || !terminalPanel;
   const showRight = !isMobile || !!terminalPanel;
 
-  async function onSelectTask(b: Branch) {
+  function onSelectTask(b: Branch) {
+    // Open the terminal immediately so the user sees the status bar
+    // ("Starting sandbox…", "Sandbox stopped", etc.) without waiting.
+    openBranchTerminal(b);
     const needsStart = !b.isTrunk && (b.status === "stopped" || b.status === "error");
     if (needsStart) {
-      await withPending(b.id, "starting", async () => {
+      // Fire-and-forget — the terminal auto-reconnects via the 2s
+      // WebSocket retry loop once the sandbox reaches "running".
+      withPending(b.id, "starting", async () => {
         await api.toggle(b.id);
         await refresh();
       });
     }
-    openBranchTerminal(b);
   }
 
   function openBranchTerminal(b: Branch) {
