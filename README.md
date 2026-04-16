@@ -8,10 +8,13 @@ A local dev tool for running multiple Claude Code agents in parallel against dif
   - `/branch <name> [base]` — start a blank sandbox on a new or existing branch.
   - `/gh-issue <url>` — derive a branch name from the issue number, create it, and seed Claude with a prompt to implement the issue.
   - `/linear <url>` — derive the branch name from the Linear ticket identifier and seed Claude with a prompt to implement it.
-- **Unified task list** — every row is a "task" (session). Trunk is always the first row with a `Dashboard` badge. Click any row to open its terminal in the right panel; if the sandbox is stopped, clicking auto-starts it. Right-click for Copy name / Open issue / Open in Linear / Preview / Open in editor / Delete.
+- **Unified task list** — every row is a "task" (session). Trunk is always the first row with a `Dashboard` badge. Click any row to open its terminal in the right panel; if the sandbox is stopped, clicking auto-starts it. Right-click for Copy name / Open issue / Open in Linear / Preview / Open in editor / Hard restart / Delete.
+- **Task file (`.tasks/<slug>.jsonl`)** — each `/gh-issue` and `/linear` command writes a structured task entry (with pre-fetched issue title, body, and comments for GitHub; Linear content when `LINEAR_API_KEY` is set). Claude reads this file for context on startup. The task section is also injected into the worktree's `CLAUDE.md` so Claude picks it up automatically.
+- **Pre-fetched issue content** — `/gh-issue` calls `gh issue view` on the host to fetch the issue title, body, and comments before the sandbox starts. Claude gets everything without needing `gh` CLI access inside the sandbox. `/linear` fetches via the GraphQL API when `LINEAR_API_KEY` is set.
 - **Session log** — each task created via `/branch`, `/gh-issue`, or `/linear` is recorded in `sessions.jsonl` with its repo, branch, the source URL, and a completion timestamp.
-- **Per-branch sandboxes** — each non-trunk task runs in its own `docker sandbox` container with Claude Code inside. Credentials from `~/.claude-sandbox/` are synced in/out of each sandbox so one login covers all of them.
-- **Seed prompt into fresh sandbox** — `/gh-issue` and `/linear` type their prompt into the Claude PTY after the input box goes quiet (1.5s of no output, or a 30s hard cap). Works against the image's default entrypoint without any image changes.
+- **Per-branch sandboxes** — each non-trunk task runs in its own `docker sandbox` container with Claude Code inside (`--dangerously-skip-permissions` since the sandbox is the security boundary). Credentials from `~/.claude-sandbox/` are synced in/out so one login covers all of them. Config is shared across sandboxes via a mount file — the first sandbox configures permissions interactively, subsequent ones inherit.
+- **Seed prompt** — after sandbox Claude starts, a short nudge ("Read CLAUDE.md and start working on the task.") is typed into the PTY once output settles (1.5s quiescence, 30s hard cap). The actual task context lives in CLAUDE.md and the task file, not the prompt itself.
+- **Self-healing restart** — the refresh button (or right-click → Hard restart) handles all failure modes: fast exec restart for running VMs (~2-3s), full stop+start for stopped VMs, and rm+recreate+start for zombie VMs with broken sockets. The terminal auto-reconnects via WebSocket with a 2s retry loop.
 - **Concurrency cap + idle auto-stop** — default 9 live sandboxes (+ trunk). Sandboxes with no PTY activity for 30 minutes are automatically stopped; status shown at the bottom-right of the task list.
 - **Customizable preview URL** — each repo stores its own dashboard URL in Settings (defaults to `http://my.localhost:3000`). The Preview action opens whatever URL the active repo is configured for.
 - **Dashboard reverse proxy** — `http://my.localhost:3000` always routes to whichever branch is currently marked active, so Calypso's hostname handling (cookies, CORS) keeps working across branches.
@@ -78,6 +81,7 @@ A local dev tool for running multiple Claude Code agents in parallel against dif
 | `SANDBOX_IDLE_CHECK_MS`     | `60000`  | Sweeper tick interval                         |
 | `DATA_DIR`                  | `.config`| Where `state.json` and `sessions.jsonl` live  |
 | `DOCKER_IMAGE`              | `claude` | Docker image used for sandboxes               |
+| `LINEAR_API_KEY`            | —        | Linear personal API key for `/linear` pre-fetch|
 
 ### Directories (under the project root's `.config/`)
 
@@ -85,6 +89,7 @@ A local dev tool for running multiple Claude Code agents in parallel against dif
 | --------------------------------- | -------------------------------------------------- |
 | `.config/state.json`              | Persisted repos, branches, active branch, settings |
 | `.config/sessions.jsonl`          | Append-only session log (one JSON row per task)    |
+| `.tasks/<slug>.jsonl`             | Per-branch task history (mounted into sandboxes)   |
 | `.config/repo/<repo>/<default>`   | Symlink to your local checkout (default branch)    |
 | `.config/repo/<repo>/<branch>`    | Per-branch git worktrees                           |
 | `~/.claude-sandbox/`              | Shared OAuth credentials injected into each sandbox|
@@ -138,6 +143,7 @@ backend/
     terminal.ts     # /api/branches/:id/terminal WebSocket
     state.ts        # state.json, repos, branches
     sessions.ts     # sessions.jsonl append-only log
+    tasks.ts        # .tasks/<slug>.jsonl per-branch task history + CLAUDE.md injection
     docker.ts       # docker sandbox lifecycle, claude ptys, seed-prompt injection
     dashboard.ts    # yarn start-dashboard lifecycle per worktree
     sharedPty.ts    # keyed pty pool for trunk claude/bash and dashboards
@@ -164,7 +170,9 @@ electron/
 
 - **Trunk runs on the host, not in a sandbox.** Gives immediate access to your real Claude config and avoids one extra layer for the main branch. The idle sweeper and concurrency cap both skip trunk.
 - **Dashboards run on the host, on a shared pty.** `docker sandbox` has no port publishing, so `yarn start-dashboard` runs on the host with `PORT=<branch.port>` set.
-- **Seed prompts use PTY quiescence, not image changes.** `spawnSandboxPty` watches the output buffer for 1.5s of silence (with a 30s hard cap) before typing the seed prompt plus Enter. No custom entrypoint script required.
+- **Task context via file, not prompt.** Task details (issue body, comments, instructions) are written to `.tasks/<slug>.jsonl` and injected into CLAUDE.md before the sandbox starts. The PTY seed prompt is just a short nudge ("Read CLAUDE.md and start working"). This makes quiescence detection reliable (short fixed string) and gives Claude a re-readable file for context.
+- **Sandbox Claude runs with `--dangerously-skip-permissions`.** The sandbox VM is the security boundary; permission prompts inside it just slow down autonomous work. The `restartSandboxClaude` exec path passes the flag; the initial `docker sandbox run` uses the image's default entrypoint.
+- **Sandbox config is independent from the host.** The shared mount file (`~/.claude-sandbox/.claude.json`) carries MCP approvals and tool permissions across sandbox sessions. Only auth identity fields (`oauthAccount`, `userID`) come from the host `~/.claude.json`. This lets sandboxes have different permissions from the host Claude.
 - **Sessions are append-only JSONL, not SQLite.** Schema is flat, writes are rare, reads are full-scan — SQLite would buy nothing. Swapping to `better-sqlite3` later would be a single-file migration if the shape stops fitting.
 - **Unified task list instead of "branches" vs "sessions" tabs.** A task = `{session?, branch?}`. Trunk has only a branch; active sandboxes have both; archived tasks (branch deleted) are filtered out.
 - **Right-click is the action surface.** Cards are clean (branch name + optional Dashboard badge), with all non-primary actions behind the context menu. Preview and Editor are also in the terminal header (as icon buttons) so they're reachable once a task is open.

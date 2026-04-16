@@ -27,6 +27,7 @@ import {
   startSandbox,
   stopSandbox,
 } from "./docker.js";
+import { buildSeedPrompt, taskFilePath } from "./tasks.js";
 import { ensureDashboardRunning } from "./dashboard.js";
 
 async function main() {
@@ -139,12 +140,19 @@ async function main() {
       if (branch.status !== "running") continue;
       if (branch.sandboxName) {
         try {
+          // Check if there's a task file for this branch — if so, send
+          // the seed prompt so Claude picks up the task on restart.
+          const slug = branch.sandboxName?.replace(/^claude-/, "") ?? "";
+          const fs = await import("node:fs/promises");
+          let seed: string | undefined;
+          try {
+            await fs.access(taskFilePath(slug));
+            seed = buildSeedPrompt();
+          } catch {}
+
           const vmStatus = await getSandboxStatus(branch.sandboxName);
           if (vmStatus === "running") {
-            // VM is still running from a previous backend session. Use
-            // exec to start a fresh Claude inside it (not `run` which
-            // hangs on an already-running VM).
-            await restartSandboxClaude(branch.sandboxName, branch.worktreePath);
+            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed);
             app.log.info(`rehydrated sandbox ${branch.sandboxName} (exec)`);
           } else if (vmStatus === "stopped") {
             // VM exists but is stopped — start it normally.

@@ -91,15 +91,28 @@ export function TerminalModal({
 
     const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
     const wsKind = kind === "logs" ? "dashboard" : kind;
-    const ws = new WebSocket(
-      `${wsProto}://${window.location.host}/api/branches/${encodeURIComponent(branch.id)}/terminal?kind=${wsKind}`
-    );
+    const wsUrl = `${wsProto}://${window.location.host}/api/branches/${encodeURIComponent(branch.id)}/terminal?kind=${wsKind}`;
 
-    ws.onopen = () => {
-      ws.send(`\x01resize:${term.cols},${term.rows}`);
-    };
-    ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : "");
-    ws.onclose = () => term.write("\r\n[connection closed]\r\n");
+    let ws: WebSocket;
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connect() {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        ws.send(`\x01resize:${term.cols},${term.rows}`);
+      };
+      ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : "");
+      ws.onclose = () => {
+        if (disposed) return;
+        // Auto-reconnect after 2s — handles PTY not ready yet,
+        // transient docker hiccups, and backend restarts.
+        reconnectTimer = setTimeout(() => {
+          if (!disposed) connect();
+        }, 2000);
+      };
+    }
+    connect();
 
     const disposable = readOnly
       ? { dispose: () => {} }
@@ -118,6 +131,8 @@ export function TerminalModal({
     ro.observe(containerRef.current);
 
     return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("paste", onPaste, true);
       container.removeEventListener("mousedown", refocus);

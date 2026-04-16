@@ -303,8 +303,25 @@ async function buildClaudeConfig(worktreePath?: string): Promise<string> {
         break;
       }
     }
+    // Pre-approve reading from .tasks/ so Claude doesn't prompt for
+    // permission when reading the task history file.
+    const existingTools: string[] = Array.isArray(sourceEntry?.allowedTools)
+      ? (sourceEntry.allowedTools as string[])
+      : [];
+    // Claude matches allowedTools patterns exactly or with prefix. Add
+    // both the directory pattern and a wildcard to cover all files.
+    const tasksPatterns = [
+      `Read(${config.tasksDir}/)`,
+      `Read(${config.tasksDir}/**)`,
+    ];
+    const mergedTools = [...existingTools];
+    for (const p of tasksPatterns) {
+      if (!mergedTools.includes(p)) mergedTools.push(p);
+    }
+
     worktreeOverrides[worktreePath] = {
       ...(sourceEntry ?? {}),
+      allowedTools: mergedTools,
       hasTrustDialogAccepted: true,
       hasClaudeMdExternalIncludesApproved: true,
       hasClaudeMdExternalIncludesWarningShown: true,
@@ -600,7 +617,11 @@ export async function removeSandbox(name: string, worktreePath?: string): Promis
 // fresh one via `docker sandbox exec`. Skips the VM stop/start cycle
 // entirely (no cred sync, no reconcile, no VM shutdown/boot). Only
 // works if the sandbox VM is still running.
-export async function restartSandboxClaude(name: string, worktreePath?: string): Promise<void> {
+export async function restartSandboxClaude(
+  name: string,
+  worktreePath?: string,
+  seedPrompt?: string
+): Promise<void> {
   const entry = runningPtys.get(name);
   if (entry) {
     try { entry.term.kill(); } catch {}
@@ -612,9 +633,14 @@ export async function restartSandboxClaude(name: string, worktreePath?: string):
   } catch (err) {
     console.error(`syncClaudeConfigIn(${name}) on restart failed:`, err);
   }
-  // Spawn a new Claude session inside the still-running VM
+  // Spawn a new Claude session inside the still-running VM, with the
+  // working directory set to the worktree so Claude finds CLAUDE.md
+  // and the project files.
   const dockerPath = resolveDockerPath();
-  const term = pty.spawn(dockerPath, ["sandbox", "exec", "-it", name, "claude"], {
+  const execArgs = ["sandbox", "exec", "-it"];
+  if (worktreePath) execArgs.push("-w", worktreePath);
+  execArgs.push(name, "claude", "--dangerously-skip-permissions");
+  const term = pty.spawn(dockerPath, execArgs, {
     name: "xterm-256color",
     cols: 120,
     rows: 30,
@@ -644,6 +670,8 @@ export async function restartSandboxClaude(name: string, worktreePath?: string):
     syncClaudeConfigOut(name).catch(() => {});
   });
   runningPtys.set(name, newEntry);
+
+  if (seedPrompt) scheduleSeedPrompt(newEntry, name, seedPrompt);
 }
 
 export async function getSandboxStatus(name: string): Promise<"running" | "stopped" | "missing"> {

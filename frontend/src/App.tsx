@@ -629,7 +629,7 @@ export function App() {
             branches.find((b) => b.id === terminalPanel.branch.id) ?? terminalPanel.branch;
           return (
           <TerminalModal
-            key={`${liveBranch.id}:${terminalPanel.kind}`}
+            key={`${liveBranch.id}:${terminalPanel.kind}:${liveBranch.status}`}
             branch={liveBranch}
             kind={terminalPanel.kind}
             fullscreen={terminalFullscreen}
@@ -767,6 +767,28 @@ export function App() {
             {!ctxMenu.branch.isTrunk && (
               <>
                 <Box borderTopWidth={1} borderColor="gray.800" my={1} />
+                <Button
+                  w="100%"
+                  size="sm"
+                  variant="ghost"
+                  justifyContent="flex-start"
+                  borderRadius={0}
+                  _hover={{ bg: "gray.800" }}
+                  disabled={!ctxMenu.branch.sandboxName}
+                  onClick={async () => {
+                    const b = ctxMenu.branch;
+                    setCtxMenu(null);
+                    try {
+                      await api.refreshSandbox(b.id, true);
+                      await refresh();
+                      toaster.create({ type: "info", title: "Sandbox rebuilt", duration: 2000 });
+                    } catch (err: any) {
+                      toaster.create({ type: "error", title: err?.message ?? "Hard restart failed", duration: 6000 });
+                    }
+                  }}
+                >
+                  Hard restart
+                </Button>
                 <Button
                   w="100%"
                   size="sm"

@@ -110,8 +110,8 @@ export const api = {
     fetch(`/api/branches/${encodeURIComponent(id)}/start-dashboard`, { method: "POST" }).then(
       j<{ running: true }>
     ),
-  refreshSandbox: (id: string) =>
-    fetch(`/api/branches/${encodeURIComponent(id)}/refresh`, { method: "POST" }).then(
+  refreshSandbox: (id: string, hard = false) =>
+    fetch(`/api/branches/${encodeURIComponent(id)}/refresh${hard ? "?hard=1" : ""}`, { method: "POST" }).then(
       j<{ ok: true }>
     ),
   openEditor: (id: string) =>

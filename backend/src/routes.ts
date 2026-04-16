@@ -39,7 +39,7 @@ import {
   stopSandbox,
 } from "./docker.js";
 import { createSession, ensureSession, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
-import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, TaskEntry } from "./tasks.js";
+import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, taskFilePath, TaskEntry } from "./tasks.js";
 
 function slugify(input: string): string {
   return (
@@ -595,33 +595,49 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/branches/:id/refresh", async (req, reply) => {
+  app.post<{ Params: { id: string }; Querystring: { hard?: string } }>("/api/branches/:id/refresh", async (req, reply) => {
     const branch = getBranch(req.params.id);
     if (!branch) return reply.code(404).send({ error: "not found" });
     if (!branch.sandboxName) return reply.code(400).send({ error: "no sandbox" });
+    const hard = req.query.hard === "1";
+
+    const slug = branch.sandboxName.replace(/^claude-/, "");
+    let seed: string | undefined;
+    try {
+      const fs = await import("node:fs/promises");
+      await fs.access(taskFilePath(slug));
+      seed = buildSeedPrompt();
+    } catch {}
+
     await updateBranch(branch.id, { status: "restarting" });
     try {
-      const vmStatus = await getSandboxStatus(branch.sandboxName);
-      if (vmStatus === "running") {
-        // Fast path: VM alive — try exec'ing a fresh Claude (~2-3s).
-        try {
-          await restartSandboxClaude(branch.sandboxName, branch.worktreePath);
-        } catch {
-          // Exec failed — zombie VM. Nuke and rebuild.
-          console.warn(`restart(${branch.sandboxName}): exec failed, rebuilding sandbox`);
-          await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-          if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
-          await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
-        }
+      if (hard) {
+        // Hard restart: nuke the entire sandbox and rebuild from scratch.
+        // Fixes stale permissions, broken VM state, corrupted config.
+        await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+        await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+        if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
+        await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
       } else {
-        // VM stopped or missing — try start, rebuild if that fails.
-        try {
-          await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
-        } catch {
-          console.warn(`restart(${branch.sandboxName}): start failed, rebuilding sandbox`);
-          await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-          if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
-          await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
+        const vmStatus = await getSandboxStatus(branch.sandboxName);
+        if (vmStatus === "running") {
+          try {
+            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed);
+          } catch {
+            console.warn(`restart(${branch.sandboxName}): exec failed, rebuilding sandbox`);
+            await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+            if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
+            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
+          }
+        } else {
+          try {
+            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
+          } catch {
+            console.warn(`restart(${branch.sandboxName}): start failed, rebuilding sandbox`);
+            await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+            if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
+            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
+          }
         }
       }
       await updateBranch(branch.id, { status: "running", error: undefined });
