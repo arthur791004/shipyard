@@ -42,6 +42,8 @@ export interface Session {
   branch: string;
   issueUrl?: string;
   linearUrl?: string;
+  prUrl?: string;
+  prNumber?: number;
   summary?: string;
   createdAt: number;
   completedAt?: number;

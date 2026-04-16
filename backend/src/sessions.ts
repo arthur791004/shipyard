@@ -1,7 +1,13 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { config } from "./config.js";
+
+interface PrInfo {
+  url: string;
+  number: number;
+}
 
 export interface Session {
   id: string;
@@ -9,6 +15,8 @@ export interface Session {
   branch: string;
   issueUrl?: string;
   linearUrl?: string;
+  prUrl?: string;
+  prNumber?: number;
   summary?: string;
   createdAt: number;
   completedAt?: number;
@@ -101,6 +109,34 @@ export async function findSessionByBranch(repo: string, branch: string): Promise
     if (r.repo === repo && r.branch === branch && !r.completedAt) return r;
   }
   return null;
+}
+
+// Fetch PR info for a branch using gh CLI. Returns null if no PR exists.
+export async function fetchPrInfo(branch: string, cwd: string): Promise<PrInfo | null> {
+  return new Promise((resolve) => {
+    const child = spawn("/bin/sh", ["-lc", `gh pr view "${branch}" --json url,number --jq '[.url, .number] | @tsv' 2>/dev/null`], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    child.stdout?.on("data", (d) => (stdout += d.toString()));
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => {
+      if (code !== 0) return resolve(null);
+      try {
+        // Output is TSV: url\tnumber
+        const [url, numStr] = stdout.trim().split("\t");
+        const number = parseInt(numStr, 10);
+        if (url && !isNaN(number)) {
+          resolve({ url, number });
+        } else {
+          resolve(null);
+        }
+      } catch {
+        resolve(null);
+      }
+    });
+  });
 }
 
 void load();

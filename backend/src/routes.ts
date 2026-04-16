@@ -36,7 +36,7 @@ import {
   startSandbox,
   stopSandbox,
 } from "./docker.js";
-import { createSession, ensureSession, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
+import { createSession, ensureSession, fetchPrInfo, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
 import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, TaskEntry } from "./tasks.js";
 
 function slugify(input: string): string {
@@ -542,7 +542,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get("/api/sessions", async () => ({ sessions: await listSessions() }));
+  app.get("/api/sessions", async () => {
+    const sessions = await listSessions();
+    const repos = listRepos();
+    // Background-enrich sessions without PR info (don't block response)
+    for (const s of sessions) {
+      if (s.completedAt || s.prUrl) continue;
+      const repo = repos.find((r) => r.name === s.repo);
+      if (!repo) continue;
+      fetchPrInfo(s.branch, repo.repoPath).then((pr) => {
+        if (pr) updateSession(s.id, { prUrl: pr.url, prNumber: pr.number });
+      });
+    }
+    return { sessions };
+  });
 
   app.post<{ Params: { id: string } }>("/api/branches/:id/start-dashboard", async (req, reply) => {
     const branch = getBranch(req.params.id);

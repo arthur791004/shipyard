@@ -669,7 +669,7 @@ export function App() {
             </Button>
 
             {/* External links group */}
-            {(ctxMenu.session?.issueUrl || ctxMenu.session?.linearUrl) && (
+            {(ctxMenu.session?.issueUrl || ctxMenu.session?.linearUrl || ctxMenu.session?.prUrl) && (
               <Box borderTopWidth={1} borderColor="gray.800" my={1} />
             )}
             {ctxMenu.session?.issueUrl && (
@@ -704,6 +704,23 @@ export function App() {
                 }}
               >
                 Open in Linear
+              </Button>
+            )}
+            {ctxMenu.session?.prUrl && (
+              <Button
+                w="100%"
+                size="sm"
+                variant="ghost"
+                justifyContent="flex-start"
+                borderRadius={0}
+                _hover={{ bg: "gray.800" }}
+                onClick={() => {
+                  const url = ctxMenu.session?.prUrl;
+                  setCtxMenu(null);
+                  if (url) window.open(url, "_blank");
+                }}
+              >
+                Open PR #{ctxMenu.session?.prNumber}
               </Button>
             )}
 
@@ -878,11 +895,31 @@ function TaskRow({ task, isSelected, pending, onSelect, onContextMenu }: TaskRow
             <Text fontSize="2xs" color="gray.500">deleting…</Text>
           </HStack>
         ) : (
-          b?.isTrunk && (
-            <Badge colorPalette="purple" variant="subtle" fontSize="2xs" flexShrink={0}>
-              Dashboard
-            </Badge>
-          )
+          <HStack gap={1} flexShrink={0}>
+            {b?.isTrunk && (
+              <Badge colorPalette="purple" variant="subtle" fontSize="2xs">
+                Dashboard
+              </Badge>
+            )}
+            {s?.prNumber && (
+              <a
+                href={s.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Badge
+                  colorPalette="green"
+                  variant="subtle"
+                  fontSize="2xs"
+                  cursor="pointer"
+                  _hover={{ opacity: 0.8 }}
+                >
+                  #{s.prNumber}
+                </Badge>
+              </a>
+            )}
+          </HStack>
         )}
       </Flex>
     </Box>
