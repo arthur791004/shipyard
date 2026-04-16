@@ -25,6 +25,7 @@ import {
   updateRepo,
   updateSettings,
   upsertBranch,
+  DEFAULT_DASHBOARD_INSTALL_CMD,
 } from "./state.js";
 import { createWorktree, deleteBranch as deleteGitBranch, detectDefaultBranch, listGitBranches, removeWorktree } from "./worktree.js";
 import { run, runOrThrow } from "./shell.js";
@@ -53,7 +54,7 @@ function slugify(input: string): string {
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
-  async function symlinkRepo(repoPath: string, linkTarget: string): Promise<void> {
+  async function cloneRepo(repoPath: string, sourceRepo: string, branch: string): Promise<void> {
     const fs = await import("node:fs/promises");
     await fs.mkdir(path.dirname(repoPath), { recursive: true });
     try {
@@ -62,7 +63,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await fs.rm(repoPath, { recursive: true, force: true });
       }
     } catch {}
-    await fs.symlink(linkTarget, repoPath);
+    // --local uses hardlinks for objects (fast, no extra disk for .git).
+    // --branch ensures we clone the default branch regardless of what
+    // the source repo currently has checked out.
+    await runOrThrow("git", ["clone", "--local", "--branch", branch, sourceRepo, repoPath]);
   }
 
   app.get("/api/settings", async () => {
@@ -128,9 +132,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      await symlinkRepo(repoPath, cleaned);
+      await cloneRepo(repoPath, cleaned, defaultBranch);
     } catch (err: any) {
-      return reply.code(500).send({ error: `Failed to symlink repo: ${err.message}` });
+      return reply.code(500).send({ error: `Failed to clone repo: ${err.message}` });
     }
 
     const repo: Repo = {
@@ -146,6 +150,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       createdAt: Date.now(),
     };
     await addRepo(repo, true);
+
+    const trunk = getBranch(trunkBranchId(repo.id));
+
+    // Return immediately so the UI is responsive. Install + dashboard
+    // start runs in the background — visible in the Logs tab.
+    if (trunk) {
+      (async () => {
+        const install = dashboardInstallCmd?.trim() || DEFAULT_DASHBOARD_INSTALL_CMD;
+        try {
+          console.log(`[${name}] running ${install} on host...`);
+          await runOrThrow("/bin/sh", ["-lc", install], { cwd: repoPath });
+          console.log(`[${name}] install done, starting dashboard`);
+        } catch (err) {
+          console.error(`[${name}] install failed:`, err);
+        }
+        try {
+          await ensureDashboardRunning(trunk.worktreePath, trunk.port);
+          await updateBranch(trunk.id, { status: "running" });
+          console.log(`[${name}] trunk dashboard running on :${trunk.port}`);
+        } catch (err) {
+          console.error(`[${name}] dashboard failed:`, err);
+        }
+      })();
+    }
+
     return { repo, activeRepoId: repo.id };
   });
 
@@ -305,6 +334,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         command: taskEntry.command,
         source: taskEntry.source,
         body: taskEntry.body,
+        port,
         ts: Date.now(),
       });
     }
@@ -320,10 +350,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
       const sbName = sandboxName(folderSlug);
       await createSandbox(sbName, worktreePath);
-      // Short nudge via PTY as a fallback in case Claude doesn't auto-start
-      // from CLAUDE.md. The real context is in the file, not the prompt.
+      // Start sandbox immediately — Claude can begin working while
+      // yarn install runs in the background.
       await startSandbox(sbName, worktreePath, port, taskEntry ? buildSeedPrompt() : undefined);
       await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
+
+      // Run install on the host in the background (fast: uses yarn
+      // cache from trunk). Claude doesn't need node_modules to start
+      // working — the dev server starts when install completes.
+      const activeRepo = getActiveRepo();
+      const installCmd = activeRepo?.dashboardInstallCmd || DEFAULT_DASHBOARD_INSTALL_CMD;
+      run("/bin/sh", ["-lc", installCmd], { cwd: worktreePath }).catch((err) =>
+        console.error(`[${branchName}] install failed:`, err)
+      );
     } catch (err) {
       // Drop the placeholder record instead of leaving an empty "error"
       // row behind — retries would otherwise accumulate duplicates.
@@ -425,8 +464,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         "1. Read the issue and comments above carefully.",
         "2. Plan the implementation — keep changes focused and minimal.",
         "3. Implement the changes and verify with relevant tests.",
-        "4. Commit with a clear message referencing the issue.",
-        "5. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
+        "4. Commit with a clear message.",
+        "5. Do NOT push or create PR — the orchestrator handles that from the host.",
       ].join("\n"));
 
       try {
@@ -487,8 +526,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         "1. Read the ticket above carefully.",
         "2. Plan the implementation — keep changes focused and minimal.",
         "3. Implement the changes and verify with relevant tests.",
-        "4. Commit with a clear message referencing the ticket.",
-        "5. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
+        "4. Commit with a clear message.",
+        "5. Do NOT push or create PR — the orchestrator handles that from the host.",
       ].join("\n"));
 
       try {
@@ -623,7 +662,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const vmStatus = await getSandboxStatus(branch.sandboxName);
         if (vmStatus === "running") {
           try {
-            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed);
+            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed, branch.port);
           } catch {
             console.warn(`restart(${branch.sandboxName}): exec failed, rebuilding sandbox`);
             await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
@@ -647,6 +686,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       console.error(`restart(${branch.sandboxName}) failed:`, err);
       await updateBranch(branch.id, { status: "error", error: err.message }).catch(() => {});
       return reply.code(500).send({ error: `restart failed: ${err.message}` });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/branches/:id/push", async (req, reply) => {
+    const branch = getBranch(req.params.id);
+    if (!branch) return reply.code(404).send({ error: "not found" });
+    if (isTrunk(branch)) return reply.code(400).send({ error: "cannot push trunk" });
+    if (!branch.worktreePath) return reply.code(400).send({ error: "no worktree" });
+
+    // Push from the host (where SSH keys and gh auth are available).
+    try {
+      await runOrThrow("git", ["push", "-u", "origin", branch.name], {
+        cwd: branch.worktreePath,
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ error: `git push failed: ${err.message}` });
+    }
+
+    // Check if a PR already exists for this branch.
+    const existing = await run("gh", ["pr", "view", "--json", "url", "--jq", ".url"], {
+      cwd: branch.worktreePath,
+    });
+    if (existing.code === 0 && existing.stdout.trim()) {
+      return { url: existing.stdout.trim(), created: false };
+    }
+
+    // Create a new PR with auto-filled title/body from commits.
+    try {
+      const url = (
+        await runOrThrow("gh", ["pr", "create", "--fill"], {
+          cwd: branch.worktreePath,
+        })
+      ).trim();
+      return { url, created: true };
+    } catch (err: any) {
+      return reply.code(500).send({ error: `gh pr create failed: ${err.message}` });
     }
   });
 

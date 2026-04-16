@@ -27,8 +27,8 @@ import {
   startSandbox,
   stopSandbox,
 } from "./docker.js";
-import { buildSeedPrompt, taskFilePath } from "./tasks.js";
 import { ensureDashboardRunning } from "./dashboard.js";
+import { buildSeedPrompt, taskFilePath } from "./tasks.js";
 
 async function main() {
   await loadState();
@@ -36,6 +36,7 @@ async function main() {
     console.error("reconcileSandboxState on boot failed:", err)
   );
 
+  // Trunk runs on the host (no sandbox, no --dangerously-skip-permissions).
   const activeRepo = getActiveRepo();
   if (activeRepo) {
     const trunkId = trunkBranchId(activeRepo.id);
@@ -46,15 +47,9 @@ async function main() {
         .then(() => true)
         .catch(() => false);
       if (!trunkOk) {
-        console.error(
-          `[trunk] worktreePath does not exist: ${trunk.worktreePath}\n` +
-            `        This usually means .config/state.json is stale from a previous repo layout.\n` +
-            `        Re-pick your repo folder in Settings, or delete .config/state.json and restart.`
-        );
         await updateBranch(trunkId, {
           status: "error",
           error: `missing worktree: ${trunk.worktreePath}`,
-          sandboxName: undefined,
         });
       } else {
         ensureDashboardRunning(trunk.worktreePath, trunk.port).catch((err) =>
@@ -97,6 +92,11 @@ async function main() {
         if (!branch) return `http://127.0.0.1:${config.proxyTargetPortFallback}`;
         return `http://127.0.0.1:${branch.port}`;
       },
+      onError: (reply: any, _details: any) => {
+        reply.code(503).type("text/html").send(
+          `<h3>Dashboard not ready</h3><p>The dev server is still starting inside the sandbox. Refresh in a moment.</p>`
+        );
+      },
     },
   });
 
@@ -118,6 +118,11 @@ async function main() {
         ...headers,
         host: req.headers.host ?? headers.host,
       }),
+      onError: (reply: any, _details: any) => {
+        reply.code(503).type("text/html").send(
+          `<h3>Dashboard not ready</h3><p>The dev server is still starting inside the sandbox. Refresh in a moment.</p>`
+        );
+      },
     },
   });
   try {
@@ -152,7 +157,7 @@ async function main() {
 
           const vmStatus = await getSandboxStatus(branch.sandboxName);
           if (vmStatus === "running") {
-            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed);
+            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed, branch.port);
             app.log.info(`rehydrated sandbox ${branch.sandboxName} (exec)`);
           } else if (vmStatus === "stopped") {
             // VM exists but is stopped — start it normally.

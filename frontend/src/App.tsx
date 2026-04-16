@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { flushSync } from "react-dom";
 import {
   Badge,
@@ -157,6 +157,51 @@ export function App() {
     };
   }, [resizing, leftWidth]);
 
+  const commandInputRef = useRef<HTMLInputElement>(null);
+
+  const taskListRef = useRef<HTMLDivElement>(null);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Cmd+P / Ctrl+P → focus command input
+      if ((e.metaKey || e.ctrlKey) && e.key === "p") {
+        e.preventDefault();
+        commandInputRef.current?.focus();
+        return;
+      }
+      // Arrow keys → navigate task list (only when task list area is
+      // focused, not when typing in the command input or terminal)
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const active = document.activeElement;
+        const inTaskList =
+          taskListRef.current?.contains(active) ||
+          active === document.body;
+        if (!inTaskList) return;
+        e.preventDefault();
+        const buttons = taskListRef.current?.querySelectorAll<HTMLElement>(
+          '[role="button"]'
+        );
+        if (!buttons || buttons.length === 0) return;
+        const currentIdx = Array.from(buttons).findIndex(
+          (el) => el === active
+        );
+        let nextIdx: number;
+        if (e.key === "ArrowDown") {
+          nextIdx = currentIdx < 0 ? 0 : (currentIdx + 1) % buttons.length;
+        } else {
+          nextIdx =
+            currentIdx < 0
+              ? buttons.length - 1
+              : (currentIdx - 1 + buttons.length) % buttons.length;
+        }
+        buttons[nextIdx].focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   function closeTerminal() {
     setTerminalFullscreen(false);
     setTerminalPanel(null);
@@ -190,11 +235,28 @@ export function App() {
     });
   }
 
-  async function onRefreshSandbox(b: Branch) {
+  async function onPushAndPR(b: Branch) {
     try {
-      await api.refreshSandbox(b.id);
+      const res = await api.pushAndPR(b.id);
+      if (res.url) {
+        toaster.create({
+          type: "info",
+          title: res.created ? "PR created" : "Pushed",
+          description: res.url,
+          duration: 8000,
+        });
+        window.open(res.url, "_blank");
+      }
+    } catch (err: any) {
+      toaster.create({ type: "error", title: err?.message ?? "Push failed", duration: 6000 });
+    }
+  }
+
+  async function onRefreshSandbox(b: Branch, hard = false) {
+    try {
+      await api.refreshSandbox(b.id, hard);
       await refresh();
-      toaster.create({ type: "info", title: "Sandbox restarted", duration: 2000 });
+      toaster.create({ type: "info", title: hard ? "Sandbox rebuilt" : "Sandbox restarted", duration: 2000 });
     } catch (err: any) {
       toaster.create({ type: "error", title: err?.message ?? "Restart failed", duration: 6000 });
     }
@@ -435,7 +497,7 @@ export function App() {
           </Tooltip.Root>
         </Flex>
 
-        <Box flex="1" overflowY="auto" px={4} py={3}>
+        <Box ref={taskListRef} flex="1" overflowY="auto" px={4} py={3}>
           {!branchesLoaded ? (
             <HStack justify="center" gap={3} py={10} color="gray.500">
               <Spinner size="sm" />
@@ -529,9 +591,10 @@ export function App() {
                 )}
                 <HStack gap={2}>
                   <Input
+                    ref={commandInputRef}
                     size="sm"
                     fontFamily="mono"
-                    placeholder={atCap ? "At sandbox cap — stop one to run more" : "Type / for commands"}
+                    placeholder={atCap ? "At sandbox cap — stop one to run more" : "Type / for commands (⌘P)"}
                     value={commandText}
                     onFocus={() => setCommandInputFocused(true)}
                     onBlur={() => setCommandInputFocused(false)}
@@ -645,7 +708,9 @@ export function App() {
             onClose={closeTerminal}
             onPreview={onPreview}
             onOpenEditor={onOpenEditor}
-            onRefresh={onRefreshSandbox}
+            onRefresh={(b) => onRefreshSandbox(b)}
+            onHardRefresh={(b) => onRefreshSandbox(b, true)}
+            onPush={(b) => onPushAndPR(b)}
           />
           );
         })() : (
@@ -750,6 +815,24 @@ export function App() {
             >
               Preview
             </Button>
+            {!ctxMenu.branch.isTrunk && (
+              <Button
+                w="100%"
+                size="sm"
+                variant="ghost"
+                justifyContent="flex-start"
+                borderRadius={0}
+                _hover={{ bg: "gray.800" }}
+                disabled={!ctxMenu.branch.worktreePath}
+                onClick={() => {
+                  const b = ctxMenu.branch;
+                  setCtxMenu(null);
+                  onPushAndPR(b);
+                }}
+              >
+                Push & PR
+              </Button>
+            )}
             <Button
               w="100%"
               size="sm"
@@ -767,8 +850,8 @@ export function App() {
               Open in editor
             </Button>
 
-            {/* Destructive group */}
-            {!ctxMenu.branch.isTrunk && (
+            {/* Reload group */}
+            {!ctxMenu.branch.isTrunk && ctxMenu.branch.sandboxName && (
               <>
                 <Box borderTopWidth={1} borderColor="gray.800" my={1} />
                 <Button
@@ -778,21 +861,35 @@ export function App() {
                   justifyContent="flex-start"
                   borderRadius={0}
                   _hover={{ bg: "gray.800" }}
-                  disabled={!ctxMenu.branch.sandboxName}
-                  onClick={async () => {
+                  onClick={() => {
                     const b = ctxMenu.branch;
                     setCtxMenu(null);
-                    try {
-                      await api.refreshSandbox(b.id, true);
-                      await refresh();
-                      toaster.create({ type: "info", title: "Sandbox rebuilt", duration: 2000 });
-                    } catch (err: any) {
-                      toaster.create({ type: "error", title: err?.message ?? "Hard restart failed", duration: 6000 });
-                    }
+                    onRefreshSandbox(b);
                   }}
                 >
-                  Hard restart
+                  Reload
                 </Button>
+                <Button
+                  w="100%"
+                  size="sm"
+                  variant="ghost"
+                  justifyContent="flex-start"
+                  borderRadius={0}
+                  _hover={{ bg: "gray.800" }}
+                  onClick={() => {
+                    const b = ctxMenu.branch;
+                    setCtxMenu(null);
+                    onRefreshSandbox(b, true);
+                  }}
+                >
+                  Hard Reload
+                </Button>
+              </>
+            )}
+
+            {/* Destructive group */}
+            {!ctxMenu.branch.isTrunk && (
+              <>
                 <Button
                   w="100%"
                   size="sm"

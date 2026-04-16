@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Box, Button, Flex, HStack, Heading, Portal, Tabs, Text, Tooltip } from "@chakra-ui/react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
@@ -18,6 +18,8 @@ interface Props {
   onPreview: (b: Branch) => void;
   onOpenEditor: (b: Branch) => void;
   onRefresh: (b: Branch) => void;
+  onHardRefresh: (b: Branch) => void;
+  onPush: (b: Branch) => void;
 }
 
 export function TerminalModal({
@@ -31,9 +33,24 @@ export function TerminalModal({
   onPreview,
   onOpenEditor,
   onRefresh,
+  onHardRefresh,
+  onPush,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalDisabled = !branch.isTrunk && branch.status !== "running";
+  const [reloadMenu, setReloadMenu] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!reloadMenu) return;
+    const close = () => setReloadMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [reloadMenu]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -187,24 +204,84 @@ export function TerminalModal({
           </Tabs.Root>
         </HStack>
         <HStack gap={2}>
-          <IconButton
-            label="Restart sandbox"
-            onClick={() => onRefresh(branch)}
-            disabled={!branch.sandboxName || branch.isTrunk}
+          <Box
+            position="relative"
+            onContextMenu={(e) => {
+              if (!branch.sandboxName) return;
+              e.preventDefault();
+              setReloadMenu({ x: e.clientX, y: e.clientY });
+            }}
           >
-            <RefreshIcon />
-          </IconButton>
+            <IconButton
+              label="Reload"
+              onClick={(_e) => onRefresh(branch)}
+              disabled={!branch.sandboxName || branch.isTrunk}
+            >
+              <RefreshIcon />
+            </IconButton>
+            {reloadMenu && (
+              <Portal>
+                <Box
+                  position="fixed"
+                  left={`${reloadMenu.x}px`}
+                  top={`${reloadMenu.y}px`}
+                  zIndex={1000}
+                  bg="gray.900"
+                  borderWidth={1}
+                  borderColor="gray.700"
+                  borderRadius="md"
+                  boxShadow="lg"
+                  minW="140px"
+                  py={1}
+                >
+                  <Button
+                    w="100%"
+                    size="sm"
+                    variant="ghost"
+                    justifyContent="flex-start"
+                    borderRadius={0}
+                    _hover={{ bg: "gray.800" }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => { setReloadMenu(null); onRefresh(branch); }}
+                  >
+                    Reload
+                  </Button>
+                  <Button
+                    w="100%"
+                    size="sm"
+                    variant="ghost"
+                    justifyContent="flex-start"
+                    borderRadius={0}
+                    _hover={{ bg: "gray.800" }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => { setReloadMenu(null); onHardRefresh(branch); }}
+                  >
+                    Hard Reload
+                  </Button>
+                </Box>
+              </Portal>
+            )}
+          </Box>
           <IconButton
             label="Preview"
-            onClick={() => onPreview(branch)}
+            onClick={(_e) => onPreview(branch)}
             disabled={branch.status !== "running"}
           >
             <PreviewIcon />
           </IconButton>
+          {!branch.isTrunk && branch.sandboxName && (
+            <IconButton
+              label="Push & create PR"
+              onClick={(_e) => onPush(branch)}
+              disabled={!branch.worktreePath}
+            >
+              <PushIcon />
+            </IconButton>
+          )}
           {!isMobile && (
             <IconButton
               label="Open in editor"
-              onClick={() => onOpenEditor(branch)}
+              onClick={(_e) => onOpenEditor(branch)}
               disabled={!branch.worktreePath}
             >
               <EditorIcon />
@@ -213,13 +290,13 @@ export function TerminalModal({
           {!isMobile && (
             <IconButton
               label={fullscreen ? "Exit full screen" : "Full screen"}
-              onClick={onFullscreenToggle}
+              onClick={(_e) => onFullscreenToggle()}
             >
               {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
             </IconButton>
           )}
           {!isMobile && (
-            <IconButton label="Close" onClick={onClose}>
+            <IconButton label="Close" onClick={(_e) => onClose()}>
               <CloseIcon />
             </IconButton>
           )}
@@ -269,7 +346,7 @@ function IconButton({
   children,
 }: {
   label: string;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent) => void;
   disabled?: boolean;
   children: React.ReactNode;
 }) {
@@ -278,7 +355,7 @@ function IconButton({
       <Tooltip.Trigger asChild>
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
           px={2}
           aria-label={label}
           onClick={onClick}
@@ -343,6 +420,15 @@ function PreviewIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function PushIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 19V5" />
+      <path d="M5 12l7-7 7 7" />
     </svg>
   );
 }

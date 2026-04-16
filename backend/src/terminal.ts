@@ -32,10 +32,6 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
         };
         let handle = attachSharedPty(dashboardKey(branch.worktreePath), onData);
         if (!handle) {
-          // No live dashboard pty yet — start one and retry the attach. Used
-          // when the user opens the Logs tab for trunk before its dashboard
-          // has been booted, or after the dashboard exited and needs a fresh
-          // spawn.
           try {
             await ensureDashboardRunning(branch.worktreePath, branch.port);
           } catch (err) {
@@ -69,6 +65,7 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
         return;
       }
 
+      // Trunk runs on the host — Claude and shell via host-side sharedPty.
       if (isTrunk(branch)) {
         const key = `${branch.id}:${kind}`;
         const shellCmd = kind === "claude" ? "claude" : "exec $SHELL -l";

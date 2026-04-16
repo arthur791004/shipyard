@@ -12,6 +12,7 @@ export interface TaskEntry {
   command: "/gh-issue" | "/linear" | "/branch";
   source?: string;
   body?: string;
+  port?: number;
   ts: number;
 }
 
@@ -57,9 +58,11 @@ export async function injectTaskIntoClaudeMd(
     "Read it, then start working on the most recent task entry.",
     "The file is appended over time — re-read it whenever you need context.",
     "",
-    "When you're done:",
-    "1. Commit with a clear message.",
-    "2. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
+    "## Sandbox rules",
+    "",
+    "- Do NOT push or create PRs — the orchestrator on the host handles that.",
+    "- You CAN run `yarn install` and start the dev server if you need to test changes.",
+    "- The host forwards your sandbox port to the browser automatically.",
     TASK_MARKER,
   ].join("\n");
 

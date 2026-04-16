@@ -126,5 +126,9 @@ export const api = {
     fetch(`/api/branches/${encodeURIComponent(id)}/logs`).then(j<{ logs: string }>),
   remove: (id: string) =>
     fetch(`/api/branches/${encodeURIComponent(id)}`, { method: "DELETE" }).then(j<{ ok: true }>),
+  pushAndPR: (id: string) =>
+    fetch(`/api/branches/${encodeURIComponent(id)}/push`, { method: "POST" }).then(
+      j<{ url: string; created: boolean }>
+    ),
   sessions: () => fetch("/api/sessions").then(j<{ sessions: Session[] }>),
 };

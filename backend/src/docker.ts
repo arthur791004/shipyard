@@ -8,7 +8,11 @@ import pty, { IPty } from "node-pty";
 import { run, runOrThrow } from "./shell.js";
 import { config } from "./config.js";
 import { ensureDashboardRunning, stopDashboard } from "./dashboard.js";
-import { listAllBranches, updateBranch } from "./state.js";
+import { ensureSharedPty } from "./sharedPty.js";
+import {
+  listAllBranches,
+  updateBranch,
+} from "./state.js";
 
 let cachedDockerPath: string | null = null;
 
@@ -620,7 +624,8 @@ export async function removeSandbox(name: string, worktreePath?: string): Promis
 export async function restartSandboxClaude(
   name: string,
   worktreePath?: string,
-  seedPrompt?: string
+  seedPrompt?: string,
+  dashboardPort?: number
 ): Promise<void> {
   const entry = runningPtys.get(name);
   if (entry) {
@@ -639,7 +644,7 @@ export async function restartSandboxClaude(
   const dockerPath = resolveDockerPath();
   const execArgs = ["sandbox", "exec", "-it"];
   if (worktreePath) execArgs.push("-w", worktreePath);
-  execArgs.push(name, "claude", "--dangerously-skip-permissions");
+  execArgs.push(name, "sh", "-lc", "exec claude --dangerously-skip-permissions");
   const term = pty.spawn(dockerPath, execArgs, {
     name: "xterm-256color",
     cols: 120,
@@ -671,6 +676,11 @@ export async function restartSandboxClaude(
   });
   runningPtys.set(name, newEntry);
 
+  if (worktreePath && dashboardPort) {
+    ensureDashboardRunning(worktreePath, dashboardPort).catch((err) =>
+      console.error(`ensureDashboardRunning(${worktreePath}:${dashboardPort}) on restart failed:`, err)
+    );
+  }
   if (seedPrompt) scheduleSeedPrompt(newEntry, name, seedPrompt);
 }
 
