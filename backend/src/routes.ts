@@ -30,7 +30,9 @@ import { createWorktree, deleteBranch as deleteGitBranch, detectDefaultBranch, l
 import { run, runOrThrow } from "./shell.js";
 import {
   createSandbox,
+  getSandboxStatus,
   removeSandbox,
+  restartSandboxClaude,
   sandboxLogs,
   sandboxName,
   startSandbox,
@@ -384,33 +386,54 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
       // Pre-fetch issue content on the host (where gh is authenticated) so
       // Claude inside the sandbox doesn't need gh CLI access.
+      let issueTitle = "";
       let issueBody = "";
+      let issueComments = "";
       try {
         const res = await run(
           "gh",
-          ["issue", "view", url, "--json", "title,body", "--jq", '"# " + .title + "\\n\\n" + .body'],
+          ["issue", "view", url, "--json", "title,body,comments", "--jq",
+           '(.title) + "\\n---BODY---\\n" + (.body) + "\\n---COMMENTS---\\n" + ([.comments[] | "**" + .author.login + "**: " + .body] | join("\\n\\n"))'],
           { cwd: repo.repoPath }
         );
-        if (res.code === 0) issueBody = res.stdout.trim();
+        if (res.code === 0) {
+          const out = res.stdout.trim();
+          const bodyIdx = out.indexOf("\n---BODY---\n");
+          const commentsIdx = out.indexOf("\n---COMMENTS---\n");
+          if (bodyIdx >= 0 && commentsIdx >= 0) {
+            issueTitle = out.slice(0, bodyIdx);
+            issueBody = out.slice(bodyIdx + 12, commentsIdx);
+            issueComments = out.slice(commentsIdx + 16);
+          } else {
+            issueBody = out;
+          }
+        }
       } catch {}
 
-      const instructions = [
-        issueBody ? `## Issue\n\n${issueBody}` : `Issue URL: ${url}`,
-        "",
+      const sections: string[] = [];
+      if (issueTitle || issueBody) {
+        sections.push(`## Issue: ${issueTitle || url}\n\n${issueBody}`);
+      } else {
+        sections.push(`## Issue\n\nURL: ${url}\n\n(Could not pre-fetch issue content. Read the issue at the URL above.)`);
+      }
+      if (issueComments.trim()) {
+        sections.push(`## Comments\n\n${issueComments}`);
+      }
+      sections.push([
         "## Instructions",
         "",
-        "1. Read the issue above carefully.",
+        "1. Read the issue and comments above carefully.",
         "2. Plan the implementation — keep changes focused and minimal.",
         "3. Implement the changes and verify with relevant tests.",
         "4. Commit with a clear message referencing the issue.",
         "5. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
-      ].join("\n");
+      ].join("\n"));
 
       try {
         const branch = await createBranchFlow(branchName, undefined, {
           command: "/gh-issue",
           source: url,
-          body: instructions,
+          body: sections.join("\n\n"),
         });
         await createSession({ repo: repo.name, branch: branch.name, issueUrl: url });
         return { kind: "issue", branch };
@@ -424,25 +447,55 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!url) return reply.code(400).send({ error: "/linear <url>" });
       const m = url.match(/linear\.app\/[^/]+\/issue\/([A-Za-z]+-\d+)/);
       if (!m) return reply.code(400).send({ error: "not a Linear issue URL" });
-      const branchName = m[1].toLowerCase();
+      const identifier = m[1];
+      const branchName = identifier.toLowerCase();
 
-      const instructions = [
-        `Linear ticket: ${url}`,
-        "",
+      // Pre-fetch Linear ticket via the API if LINEAR_API_KEY is set.
+      let ticketTitle = "";
+      let ticketBody = "";
+      const linearApiKey = process.env.LINEAR_API_KEY;
+      if (linearApiKey) {
+        try {
+          const query = JSON.stringify({
+            query: `{ issue(id: "${identifier}") { title description } }`,
+          });
+          const res = await run("curl", [
+            "-s",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-H", `Authorization: ${linearApiKey}`,
+            "-d", query,
+            "https://api.linear.app/graphql",
+          ]);
+          if (res.code === 0) {
+            const data = JSON.parse(res.stdout);
+            ticketTitle = data?.data?.issue?.title ?? "";
+            ticketBody = data?.data?.issue?.description ?? "";
+          }
+        } catch {}
+      }
+
+      const sections: string[] = [];
+      if (ticketTitle || ticketBody) {
+        sections.push(`## ${identifier}: ${ticketTitle}\n\n${ticketBody}`);
+      } else {
+        sections.push(`## Linear ticket: ${identifier}\n\nURL: ${url}\n\n(Set LINEAR_API_KEY to pre-fetch ticket content, or read it at the URL above.)`);
+      }
+      sections.push([
         "## Instructions",
         "",
-        "1. Read the ticket above (use the Linear MCP server if available, or ask the user for details).",
+        "1. Read the ticket above carefully.",
         "2. Plan the implementation — keep changes focused and minimal.",
         "3. Implement the changes and verify with relevant tests.",
         "4. Commit with a clear message referencing the ticket.",
         "5. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
-      ].join("\n");
+      ].join("\n"));
 
       try {
         const branch = await createBranchFlow(branchName, undefined, {
           command: "/linear",
           source: url,
-          body: instructions,
+          body: sections.join("\n\n"),
         });
         const repo = getActiveRepo();
         if (repo) await createSession({ repo: repo.name, branch: branch.name, linearUrl: url });
@@ -547,23 +600,37 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!branch) return reply.code(404).send({ error: "not found" });
     if (!branch.sandboxName) return reply.code(400).send({ error: "no sandbox" });
     await updateBranch(branch.id, { status: "restarting" });
-    // Non-blocking: return immediately so the UI shows "Restarting…" and
-    // the 3s branch poll picks up the final status when it's done.
-    const sbName = branch.sandboxName;
-    const wtPath = branch.worktreePath;
-    const port = branch.port;
-    const branchId = branch.id;
-    (async () => {
-      try {
-        await stopSandbox(sbName, wtPath).catch(() => {});
-        await startSandbox(sbName, wtPath, port);
-        await updateBranch(branchId, { status: "running", error: undefined });
-      } catch (err: any) {
-        console.error(`restart(${sbName}) failed:`, err);
-        await updateBranch(branchId, { status: "error", error: err.message }).catch(() => {});
+    try {
+      const vmStatus = await getSandboxStatus(branch.sandboxName);
+      if (vmStatus === "running") {
+        // Fast path: VM alive — try exec'ing a fresh Claude (~2-3s).
+        try {
+          await restartSandboxClaude(branch.sandboxName, branch.worktreePath);
+        } catch {
+          // Exec failed — zombie VM. Nuke and rebuild.
+          console.warn(`restart(${branch.sandboxName}): exec failed, rebuilding sandbox`);
+          await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+          if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
+          await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
+        }
+      } else {
+        // VM stopped or missing — try start, rebuild if that fails.
+        try {
+          await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
+        } catch {
+          console.warn(`restart(${branch.sandboxName}): start failed, rebuilding sandbox`);
+          await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+          if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
+          await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
+        }
       }
-    })();
-    return { ok: true };
+      await updateBranch(branch.id, { status: "running", error: undefined });
+      return { ok: true };
+    } catch (err: any) {
+      console.error(`restart(${branch.sandboxName}) failed:`, err);
+      await updateBranch(branch.id, { status: "error", error: err.message }).catch(() => {});
+      return reply.code(500).send({ error: `restart failed: ${err.message}` });
+    }
   });
 
   app.get("/api/sessions", async () => ({ sessions: await listSessions() }));

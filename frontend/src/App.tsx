@@ -269,6 +269,9 @@ export function App() {
 
   async function onDelete(b: Branch) {
     if (!confirm(`Delete branch "${b.name}"? Worktree will be removed.`)) return;
+    if (terminalPanel && terminalPanel.branch.id === b.id) {
+      closeTerminal();
+    }
     await withPending(b.id, "deleting", async () => {
       await api.remove(b.id);
       await refresh();

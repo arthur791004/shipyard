@@ -596,6 +596,56 @@ export async function removeSandbox(name: string, worktreePath?: string): Promis
   }
 }
 
+// Fast restart: kill the Claude process inside the sandbox and spawn a
+// fresh one via `docker sandbox exec`. Skips the VM stop/start cycle
+// entirely (no cred sync, no reconcile, no VM shutdown/boot). Only
+// works if the sandbox VM is still running.
+export async function restartSandboxClaude(name: string, worktreePath?: string): Promise<void> {
+  const entry = runningPtys.get(name);
+  if (entry) {
+    try { entry.term.kill(); } catch {}
+    runningPtys.delete(name);
+  }
+  // Sync fresh config in (fast — one exec call via pipe)
+  try {
+    await syncClaudeConfigIn(name, worktreePath);
+  } catch (err) {
+    console.error(`syncClaudeConfigIn(${name}) on restart failed:`, err);
+  }
+  // Spawn a new Claude session inside the still-running VM
+  const dockerPath = resolveDockerPath();
+  const term = pty.spawn(dockerPath, ["sandbox", "exec", "-it", name, "claude"], {
+    name: "xterm-256color",
+    cols: 120,
+    rows: 30,
+    cwd: process.env.HOME || process.cwd(),
+    env: process.env as { [key: string]: string },
+  });
+  const newEntry: SandboxPty = {
+    term,
+    buffer: "",
+    subscribers: new Set(),
+    lastActivity: Date.now(),
+  };
+  term.onData((data) => {
+    newEntry.lastActivity = Date.now();
+    newEntry.buffer = (newEntry.buffer + data).slice(-SCROLLBACK_LIMIT);
+    for (const sub of newEntry.subscribers) sub(data);
+  });
+  term.onExit(() => {
+    runningPtys.delete(name);
+    const branch = listAllBranches().find((b) => b.sandboxName === name);
+    if (branch && branch.status === "running") {
+      updateBranch(branch.id, { status: "stopped" }).catch((err) =>
+        console.error(`updateBranch(${branch.id}) on unexpected pty exit failed:`, err)
+      );
+    }
+    syncCredentialsOut(name).catch(() => {});
+    syncClaudeConfigOut(name).catch(() => {});
+  });
+  runningPtys.set(name, newEntry);
+}
+
 export async function getSandboxStatus(name: string): Promise<"running" | "stopped" | "missing"> {
   const res = await run("docker", ["sandbox", "ls"]);
   for (const line of res.stdout.split("\n")) {

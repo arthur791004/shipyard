@@ -19,7 +19,9 @@ import { ensureSession } from "./sessions.js";
 import { registerRoutes } from "./routes.js";
 import { registerTerminal } from "./terminal.js";
 import {
+  getSandboxStatus,
   reconcileSandboxState,
+  restartSandboxClaude,
   runningSandboxNames,
   sandboxLastActivity,
   startSandbox,
@@ -58,22 +60,6 @@ async function main() {
           console.error("failed to rehydrate trunk dashboard:", err)
         );
         await updateBranch(trunkId, { status: "running", sandboxName: undefined });
-      }
-    }
-  }
-
-  for (const branch of listAllBranches()) {
-    if (isTrunk(branch)) continue;
-    // Backfill a session for every non-trunk branch so the unified task list
-    // surfaces anything created before sessions existed.
-    const repo = getRepo(branch.repoId);
-    if (repo) await ensureSession(repo.name, branch.name).catch(() => {});
-    if (branch.status !== "running") continue;
-    if (branch.sandboxName) {
-      try {
-        await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
-      } catch (err) {
-        console.error(`failed to rehydrate sandbox ${branch.sandboxName}:`, err);
       }
     }
   }
@@ -141,6 +127,40 @@ async function main() {
   }
 
   startIdleSandboxSweeper(app.log);
+
+  // Rehydrate sandboxes in the background AFTER the server is listening,
+  // so the API is responsive immediately and the frontend doesn't get
+  // ECONNREFUSED while sandboxes boot (which can take 5-10s each).
+  (async () => {
+    for (const branch of listAllBranches()) {
+      if (isTrunk(branch)) continue;
+      const repo = getRepo(branch.repoId);
+      if (repo) await ensureSession(repo.name, branch.name).catch(() => {});
+      if (branch.status !== "running") continue;
+      if (branch.sandboxName) {
+        try {
+          const vmStatus = await getSandboxStatus(branch.sandboxName);
+          if (vmStatus === "running") {
+            // VM is still running from a previous backend session. Use
+            // exec to start a fresh Claude inside it (not `run` which
+            // hangs on an already-running VM).
+            await restartSandboxClaude(branch.sandboxName, branch.worktreePath);
+            app.log.info(`rehydrated sandbox ${branch.sandboxName} (exec)`);
+          } else if (vmStatus === "stopped") {
+            // VM exists but is stopped — start it normally.
+            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
+            app.log.info(`rehydrated sandbox ${branch.sandboxName} (start)`);
+          } else {
+            // VM is missing entirely — mark as stopped.
+            await updateBranch(branch.id, { status: "stopped" });
+            app.log.info(`sandbox ${branch.sandboxName} missing, marked stopped`);
+          }
+        } catch (err) {
+          app.log.error({ err }, `failed to rehydrate sandbox ${branch.sandboxName}`);
+        }
+      }
+    }
+  })();
 }
 
 // Periodically stop idle sandboxes and flag stuck creates.
