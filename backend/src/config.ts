@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const configDir = path.join(projectRoot, ".config");
+const tasksDir = path.join(projectRoot, ".tasks");
 const DEFAULT_REPO_NAME = "wp-calypso";
 const DEFAULT_BRANCH_FALLBACK = "trunk";
 
@@ -26,6 +27,7 @@ export const config = {
   proxyTargetPortFallback: 4000,
   projectRoot,
   configDir,
+  tasksDir,
   dataDir: process.env.DATA_DIR ?? configDir,
   defaultRepoUrl: "git@github.com:Automattic/wp-calypso.git",
   repoPath: process.env.REPO_PATH ?? defaultPaths.repoPath,

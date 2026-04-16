@@ -36,7 +36,8 @@ import {
   startSandbox,
   stopSandbox,
 } from "./docker.js";
-import { createSession, ensureSession, listSessions } from "./sessions.js";
+import { createSession, ensureSession, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
+import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, TaskEntry } from "./tasks.js";
 
 function slugify(input: string): string {
   return (
@@ -270,7 +271,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { exists: res.code === 0 && res.stdout.trim().length > 0 };
   });
 
-  async function createBranchFlow(name: string, base?: string, seedPrompt?: string): Promise<Branch> {
+  async function createBranchFlow(
+    name: string,
+    base?: string,
+    taskEntry?: Omit<TaskEntry, "type" | "ts">
+  ): Promise<Branch> {
     const activeRepo = getActiveRepo();
     if (!activeRepo) throw new Error("no active repo");
 
@@ -290,11 +295,32 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     };
     await upsertBranch(branch);
 
+    // Write the task history file before starting the sandbox so Claude
+    // can read it on startup.
+    if (taskEntry) {
+      await appendTaskEntry(folderSlug, {
+        type: "task",
+        command: taskEntry.command,
+        source: taskEntry.source,
+        body: taskEntry.body,
+        ts: Date.now(),
+      });
+    }
+
     try {
       const worktreePath = await createWorktree(folderSlug, branchName, base);
+
+      // Inject task instructions into the worktree's CLAUDE.md so Claude
+      // reads them automatically on startup — no PTY timing dependency.
+      if (taskEntry) {
+        await injectTaskIntoClaudeMd(worktreePath, folderSlug);
+      }
+
       const sbName = sandboxName(folderSlug);
       await createSandbox(sbName, worktreePath);
-      await startSandbox(sbName, worktreePath, port, seedPrompt);
+      // Short nudge via PTY as a fallback in case Claude doesn't auto-start
+      // from CLAUDE.md. The real context is in the file, not the prompt.
+      await startSandbox(sbName, worktreePath, port, taskEntry ? buildSeedPrompt() : undefined);
       await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
     } catch (err) {
       // Drop the placeholder record instead of leaving an empty "error"
@@ -337,6 +363,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const base = rest[1];
       if (!name) return reply.code(400).send({ error: "/branch <name> [base]" });
       try {
+        // Plain /branch gets no task entry and no seed prompt — just a blank
+        // sandbox. The user drives Claude directly from the terminal.
         const branch = await createBranchFlow(name, base);
         const repo = getActiveRepo();
         if (repo) await createSession({ repo: repo.name, branch: branch.name });
@@ -351,11 +379,40 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!url) return reply.code(400).send({ error: "/gh-issue <url>" });
       const m = url.match(/github\.com\/[^/]+\/[^/]+\/issues\/(\d+)/);
       const branchName = m ? `issue-${m[1]}` : `issue-${Date.now()}`;
-      const seedPrompt = `Please implement the following GitHub issue: ${url}\n\nRead the issue, plan the change, implement it, and commit when done.`;
+      const repo = getActiveRepo();
+      if (!repo) return reply.code(400).send({ error: "no active repo" });
+
+      // Pre-fetch issue content on the host (where gh is authenticated) so
+      // Claude inside the sandbox doesn't need gh CLI access.
+      let issueBody = "";
       try {
-        const branch = await createBranchFlow(branchName, undefined, seedPrompt);
-        const repo = getActiveRepo();
-        if (repo) await createSession({ repo: repo.name, branch: branch.name, issueUrl: url });
+        const res = await run(
+          "gh",
+          ["issue", "view", url, "--json", "title,body", "--jq", '"# " + .title + "\\n\\n" + .body'],
+          { cwd: repo.repoPath }
+        );
+        if (res.code === 0) issueBody = res.stdout.trim();
+      } catch {}
+
+      const instructions = [
+        issueBody ? `## Issue\n\n${issueBody}` : `Issue URL: ${url}`,
+        "",
+        "## Instructions",
+        "",
+        "1. Read the issue above carefully.",
+        "2. Plan the implementation — keep changes focused and minimal.",
+        "3. Implement the changes and verify with relevant tests.",
+        "4. Commit with a clear message referencing the issue.",
+        "5. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
+      ].join("\n");
+
+      try {
+        const branch = await createBranchFlow(branchName, undefined, {
+          command: "/gh-issue",
+          source: url,
+          body: instructions,
+        });
+        await createSession({ repo: repo.name, branch: branch.name, issueUrl: url });
         return { kind: "issue", branch };
       } catch (err: any) {
         return reply.code(500).send({ error: err.message });
@@ -368,9 +425,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const m = url.match(/linear\.app\/[^/]+\/issue\/([A-Za-z]+-\d+)/);
       if (!m) return reply.code(400).send({ error: "not a Linear issue URL" });
       const branchName = m[1].toLowerCase();
-      const seedPrompt = `Please implement the following Linear issue: ${url}\n\nRead the ticket (use the Linear MCP server if available, or ask me for the details), plan the change, implement it, and commit when done.`;
+
+      const instructions = [
+        `Linear ticket: ${url}`,
+        "",
+        "## Instructions",
+        "",
+        "1. Read the ticket above (use the Linear MCP server if available, or ask the user for details).",
+        "2. Plan the implementation — keep changes focused and minimal.",
+        "3. Implement the changes and verify with relevant tests.",
+        "4. Commit with a clear message referencing the ticket.",
+        "5. Push and open a PR: `git push -u origin HEAD && gh pr create --fill`",
+      ].join("\n");
+
       try {
-        const branch = await createBranchFlow(branchName, undefined, seedPrompt);
+        const branch = await createBranchFlow(branchName, undefined, {
+          command: "/linear",
+          source: url,
+          body: instructions,
+        });
         const repo = getActiveRepo();
         if (repo) await createSession({ repo: repo.name, branch: branch.name, linearUrl: url });
         return { kind: "linear", branch };
@@ -544,6 +617,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     if (branch.worktreePath) await removeWorktree(branch.worktreePath).catch(() => {});
     if (branch.name) await deleteGitBranch(branch.name).catch(() => {});
+    // Mark the session as completed so the same issue/linear URL can be
+    // re-run after deletion — the frontend validation checks completedAt.
+    const repo = getActiveRepo();
+    if (repo) {
+      const session = await findSessionByBranch(repo.name, branch.name);
+      if (session) await updateSession(session.id, { completedAt: Date.now() });
+    }
     await removeBranch(branch.id);
     return { ok: true };
   });

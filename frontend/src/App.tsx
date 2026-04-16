@@ -83,6 +83,79 @@ export function App() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  const [commandText, setCommandText] = useState("");
+  const [commandBusy, setCommandBusy] = useState(false);
+  const [commandMenuIndex, setCommandMenuIndex] = useState(0);
+  const [commandInputFocused, setCommandInputFocused] = useState(false);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; branch: Branch; session?: Session } | null>(null);
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onClick = () => setCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCtxMenu(null);
+    };
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [ctxMenu]);
+
+  useEffect(() => {
+    const load = () => api.sessions().then((r) => setSessions(r.sessions)).catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  // On narrow viewports we show one column at a time: task list by default,
+  // terminal fullscreen when a task is selected. Back = close the terminal.
+  const isMobile = useBreakpointValue({ base: true, md: false }) ?? false;
+
+  // Resizable left column — persisted width, clamped to [280, 720].
+  const LEFT_WIDTH_KEY = "calypso.leftWidth";
+  const LEFT_WIDTH_MIN = 280;
+  const LEFT_WIDTH_MAX = 720;
+  const LEFT_WIDTH_DEFAULT = 440;
+  const [leftWidth, setLeftWidth] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(LEFT_WIDTH_KEY);
+      if (!raw) return LEFT_WIDTH_DEFAULT;
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n)) return LEFT_WIDTH_DEFAULT;
+      return Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, n));
+    } catch {
+      return LEFT_WIDTH_DEFAULT;
+    }
+  });
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => {
+    if (!resizing) return;
+    const onMove = (e: MouseEvent) => {
+      const next = Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, e.clientX));
+      setLeftWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      try {
+        localStorage.setItem(LEFT_WIDTH_KEY, String(leftWidth));
+      } catch {}
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [resizing, leftWidth]);
 
   function closeTerminal() {
     setTerminalFullscreen(false);
@@ -117,33 +190,6 @@ export function App() {
     });
   }
 
-  const [commandText, setCommandText] = useState("");
-  const [commandBusy, setCommandBusy] = useState(false);
-  const [commandMenuIndex, setCommandMenuIndex] = useState(0);
-  const [commandInputFocused, setCommandInputFocused] = useState(false);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; branch: Branch; session?: Session } | null>(null);
-
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const onClick = () => setCtxMenu(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setCtxMenu(null);
-    };
-    document.addEventListener("click", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("click", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [ctxMenu]);
-
-  useEffect(() => {
-    const load = () => api.sessions().then((r) => setSessions(r.sessions)).catch(() => {});
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
 
   function validateCommand(text: string): string | null {
     if (!text.startsWith("/")) return "Commands must start with /";
@@ -240,66 +286,31 @@ export function App() {
   const atCap = runningSandboxCount >= sandboxCap;
   const trunk = branches.find((b) => b.isTrunk);
   const activeRepoName = repos.find((r) => r.id === activeRepoId)?.name;
-  const sessionTasks: Task[] = sessions
-    .filter((s) => !activeRepoName || s.repo === activeRepoName)
-    .map((s) => ({
-      session: s,
-      branch: branches.find((b) => !b.isTrunk && b.name === s.branch),
-    }))
-    // Hide archived rows — once the branch is gone, the task is gone too.
-    .filter((t) => !!t.branch)
-    .sort((a, b) => (a.branch?.name ?? "").localeCompare(b.branch?.name ?? ""));
+  const sessionTasks: Task[] = (() => {
+    const all = sessions
+      .filter((s) => !activeRepoName || s.repo === activeRepoName)
+      .map((s) => ({
+        session: s,
+        branch: branches.find((b) => !b.isTrunk && b.name === s.branch),
+      }))
+      // Hide archived rows — once the branch is gone, the task is gone too.
+      .filter((t) => !!t.branch);
+    // Deduplicate by branch name — sessions are sorted newest-first from the
+    // backend, so the first match for each branch is the most recent session.
+    const seen = new Set<string>();
+    const deduped: Task[] = [];
+    for (const t of all) {
+      const name = t.branch!.name;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      deduped.push(t);
+    }
+    return deduped.sort((a, b) => (a.branch?.name ?? "").localeCompare(b.branch?.name ?? ""));
+  })();
   const tasks: Task[] = trunk ? [{ branch: trunk }, ...sessionTasks] : sessionTasks;
 
-  // On narrow viewports we show one column at a time: task list by default,
-  // terminal fullscreen when a task is selected. Back = close the terminal.
-  const isMobile = useBreakpointValue({ base: true, md: false }) ?? false;
   const showLeft = !isMobile || !terminalPanel;
   const showRight = !isMobile || !!terminalPanel;
-
-  // Resizable left column — persisted width, clamped to [280, 720] so the
-  // terminal doesn't get squeezed to nothing and the list doesn't take over
-  // the screen. Disabled on mobile (the layout is single-column anyway).
-  const LEFT_WIDTH_KEY = "calypso.leftWidth";
-  const LEFT_WIDTH_MIN = 280;
-  const LEFT_WIDTH_MAX = 720;
-  const LEFT_WIDTH_DEFAULT = 440;
-  const [leftWidth, setLeftWidth] = useState<number>(() => {
-    try {
-      const raw = localStorage.getItem(LEFT_WIDTH_KEY);
-      if (!raw) return LEFT_WIDTH_DEFAULT;
-      const n = parseInt(raw, 10);
-      if (!Number.isFinite(n)) return LEFT_WIDTH_DEFAULT;
-      return Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, n));
-    } catch {
-      return LEFT_WIDTH_DEFAULT;
-    }
-  });
-  const [resizing, setResizing] = useState(false);
-
-  useEffect(() => {
-    if (!resizing) return;
-    const onMove = (e: MouseEvent) => {
-      const next = Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, e.clientX));
-      setLeftWidth(next);
-    };
-    const onUp = () => {
-      setResizing(false);
-      try {
-        localStorage.setItem(LEFT_WIDTH_KEY, String(leftWidth));
-      } catch {}
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-  }, [resizing, leftWidth]);
 
   async function onSelectTask(b: Branch) {
     const needsStart = !b.isTrunk && (b.status === "stopped" || b.status === "error");

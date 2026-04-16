@@ -1,47 +1,86 @@
 # TODO
 
-## 1. Manual snapshot / summary capture via Claude
+## 1. Task file via shared `.tasks/` folder
 
-Right-click a task → **Snapshot**. Backend types a short prompt into the sandbox PTY asking Claude to write `.calypso-summary.md` in the project root, then polls the worktree for the file (3s interval, 2 min timeout). When it appears, read it, call `updateSession(id, { summary })`, delete the file. Frontend's session poll picks it up and renders the summary as a subtitle under the branch name.
+Replace the current quiescence-based seed-prompt injection with a more reliable file-based approach.
+
+- Backend writes `.tasks/<branch-name>.jsonl` in the `calypso-multi-agent` project root when a command is dispatched
+- Mount `.tasks/` (read-only) into every sandbox alongside the worktree
+- Fixed seed prompt becomes: `"Read .tasks/<branch-name>.jsonl for context and start working on the latest task"`
+- Seed prompt is now short and stable — quiescence detection becomes much more reliable
+- Claude can re-read the file at any time for context
+- Snapshot appends a `summary` entry to the same file, so Claude sees full history on restart
+
+`.tasks/<branch-name>.jsonl` format:
+```jsonl
+{"type": "task", "command": "/gh-issue", "source": "https://...", "body": "...", "ts": 1234567890}
+{"type": "summary", "text": "Implemented navbar color change...", "ts": 1234567891}
+{"type": "task", "command": "/gh-issue", "source": "https://...", "body": "...", "ts": 1234567892}
+```
+
+## 2. Web server inside sandbox + port forwarding
+
+Move the per-branch dev server from host into the sandbox so Claude can manage it directly.
+
+- Claude starts the dev server inside the sandbox (e.g. `yarn start-dashboard`) binding to `0.0.0.0`
+- After sandbox starts, backend automatically calls `docker sandbox ports <n> --publish <host-port>:<container-port>` to forward the port
+- Remove the host-side `dashboard.ts` pty process for sandboxed branches (trunk stays as-is)
+- Port assignment stays the same (`4001–4999` range), just forwarded from sandbox instead of host
+- Published ports don't survive sandbox stop/restart — re-run `docker sandbox ports` on resume
+
+## 3. Right-click → Generate Summary
+
+Right-click a task → **Generate Summary**. Backend asks Claude to summarize what it has done so far, then appends the result to `.tasks/<branch-name>.jsonl`.
 
 - New endpoint: `POST /api/branches/:id/snapshot`
-- Uses the existing seed-prompt PTY write mechanism (`entry.term.write`)
-- Polls `fs.stat` rather than `fs.watch` (macOS fs.watch is flaky)
+- Backend types a short prompt into the sandbox PTY: `"Summarize what you've done so far and write it to .tasks/<branch-name>.jsonl as {"type":"summary","text":"...","ts":<timestamp>}, then continue what you were doing"`
+- Polls `.tasks/<branch-name>.jsonl` for a new `summary` entry (3s interval, 2 min timeout)
+- On success, call `updateSession(id, { summary })` so the UI can display it as a subtitle under the branch name
 - Surface a "timed out" toast if Claude doesn't comply within 2 min
-- Prompt ends with "then continue what you were doing" so Claude doesn't stop mid-task
 
-## 2. Tailscale + Caddy host setup
+## 4. Generate summary via sub-agent file watcher
 
-Out of scope for in-editor work — needs the user at the Mac.
+Instead of writing into the PTY directly, use a sub-agent inside the sandbox to watch `.tasks/<branch-name>.jsonl` for requests.
 
-- Install Tailscale, sign Mac + phone into the same tailnet, enable MagicDNS
-- Caddyfile with wildcard `*.mac.ts.net` → backend
-- Sandbox lifecycle registers/unregisters a per-branch subdomain (e.g. `issue-42.mac.ts.net` → `127.0.0.1:<branch.port>`)
-- Backend already listens on `0.0.0.0`, so LAN access works today; this is only about pretty hostnames and remote access via Tailscale
+- On sandbox start, main Claude spawns a sub-agent that watches `.tasks/<branch-name>.jsonl`
+- Backend appends `{"type":"snapshot-request","ts":<timestamp>}` to trigger a summary
+- Sub-agent detects the new entry and notifies main Claude
+- Main Claude generates a summary and sub-agent appends it back:
+  `{"type":"summary","text":"...","ts":<timestamp>}`
+- Backend polls for the new `summary` entry (3s interval, 2 min timeout)
+- On success, call `updateSession(id, { summary })` so the UI can display it
 
-## 3. Touch-device context menu
+Sub-agent watcher (simple bash loop or Claude Code sub-agent):
+```bash
+while true; do
+  if grep -q "snapshot-request" .tasks/<branch>.jsonl; then
+    # notify main Claude
+  fi
+  sleep 2
+done
+```
 
-Right-click doesn't exist on tablets/phones, so Delete, Copy name, Open issue, etc. are unreachable on touch. The responsive layout otherwise works fine on mobile.
+Benefits over PTY injection:
+- Main Claude is never interrupted mid-task
+- No timing or quiescence guessing
+- Clean separation of concerns
 
-- Long-press (say 500ms) on a `TaskRow` opens the same context menu
-- `onTouchStart` starts a timer; `onTouchEnd` / `onTouchMove` cancels it
-- Position the menu relative to the touch point, not page coords — mobile viewports scroll
+## 5. Chat mode vs Terminal mode
 
-## 4. Arrow-key navigation in task list
+Add a setting to switch between two interaction modes per sandbox.
 
-Tab navigation works, but cycling through many tasks with Tab is slow. Arrow keys would let the user walk the list with ↑/↓ and activate with Enter.
+**Terminal mode** (current)
+- Claude runs in PTY, right panel shows raw terminal output
+- You interact by typing directly into xterm.js
 
-- Track a focused-task index at the App level
-- ↑/↓ updates index, wraps at ends
-- Enter on the focused row triggers `onSelectTask`
-- Tab still works (browser default), this is additive
+**Chat mode**
+- Claude runs with `--input-format stream-json --output-format stream-json`
+- Right panel shows chat bubble UI instead of raw terminal
+- Send messages via input box, responses streamed back as structured JSON
+- Generate summary becomes a simple `send_message()` call — no PTY timing, no file polling needed
+- Sub-agent file watcher (TODO #4) not needed in this mode
 
-## 5. Swap JSONL → SQLite
-
-Only if `sessions.jsonl` becomes a problem:
-
-- Rows > a few thousand and read-all-on-load gets slow
-- Want to filter/join on the frontend (e.g. "show all `/linear` tasks from last week")
-- Otherwise JSONL is fine
-
-Migration would be a single-file swap of `backend/src/sessions.ts`. Schema is already flat.
+**Settings**
+- Global default in settings (terminal | chat)
+- Per-branch override via right-click context menu → "Switch to Chat / Terminal mode"
+- Mode stored in `state.json` per branch

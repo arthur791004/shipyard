@@ -158,7 +158,8 @@ export async function createSandbox(name: string, worktreePath: string): Promise
   await reconcileSandboxState();
   if (await sandboxExists(name)) return;
   await fsp.mkdir(config.claudeSandboxDir, { recursive: true });
-  const mounts = [worktreePath, config.claudeSandboxDir];
+  await fsp.mkdir(config.tasksDir, { recursive: true });
+  const mounts = [worktreePath, config.claudeSandboxDir, config.tasksDir];
   const mainRepoPath = await resolveMainRepoPath(worktreePath);
   if (mainRepoPath && !mounts.includes(mainRepoPath)) mounts.push(mainRepoPath);
   try {
