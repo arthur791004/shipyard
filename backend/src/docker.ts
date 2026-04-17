@@ -564,6 +564,13 @@ export async function startSandbox(
   await refreshMountFromPeers(name).catch((err) =>
     console.error(`refreshMountFromPeers(${name}) failed:`, err)
   );
+  // Ensure yarn is available inside the sandbox (needed for git hooks).
+  try {
+    await run(resolveDockerPath(), [
+      "sandbox", "exec", name, "sh", "-c",
+      "command -v yarn >/dev/null 2>&1 || npm install -g yarn >/dev/null 2>&1",
+    ]);
+  } catch {}
   try {
     await syncCredentialsIn(name);
   } catch (err) {

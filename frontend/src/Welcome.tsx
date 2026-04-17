@@ -111,7 +111,7 @@ export function Welcome({ onDone }: Props) {
         flexDirection="column"
       >
         <Flex justify="space-between" align="center" mb={6}>
-          <Heading size="lg">Calypso Multi-Agent</Heading>
+          <Heading size="lg">Shipyard</Heading>
           <StepDots current={step} />
         </Flex>
         <Box flex={1} display="flex" flexDirection="column">
@@ -146,7 +146,7 @@ export function Welcome({ onDone }: Props) {
             <Stack gap={1}>
               <Heading size="md">Check dependencies</Heading>
               <Text color="gray.400" fontSize="sm">
-                These are the CLIs Calypso Multi-Agent shells out to. Required ones must be present
+                These are the CLIs Shipyard shells out to. Required ones must be present
                 before you can continue; optional ones enable extra features.
               </Text>
             </Stack>

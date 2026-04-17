@@ -1,5 +1,5 @@
 {
-  "name": "calypso-multi-agent",
+  "name": "shipyard",
   "private": true,
   "workspaces": ["backend", "frontend", "electron"],
   "scripts": {

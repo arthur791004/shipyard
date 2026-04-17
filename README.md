@@ -1,4 +1,4 @@
-# Calypso Multi-Agent
+# Shipyard
 
 A local dev tool for running multiple Claude Code agents in parallel against different branches of [wp-calypso](https://github.com/Automattic/wp-calypso) — or any other git repo. Drive the whole thing from a single composer with slash commands: give Claude a GitHub issue or a Linear ticket and it spins up an isolated sandbox and starts working. The UI stays out of the way — a list of tasks on the left, a live terminal on the right.
 

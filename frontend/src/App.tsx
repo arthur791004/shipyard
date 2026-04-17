@@ -116,7 +116,7 @@ export function App() {
   const isMobile = useBreakpointValue({ base: true, md: false }) ?? false;
 
   // Resizable left column — persisted width, clamped to [280, 720].
-  const LEFT_WIDTH_KEY = "calypso.leftWidth";
+  const LEFT_WIDTH_KEY = "shipyard.leftWidth";
   const LEFT_WIDTH_MIN = 280;
   const LEFT_WIDTH_MAX = 720;
   const LEFT_WIDTH_DEFAULT = 440;
@@ -462,7 +462,7 @@ export function App() {
           flexShrink={0}
         >
           <Heading size="sm" truncate flex="1" minW={0}>
-            Calypso Multi-Agent
+            Shipyard
           </Heading>
           <Box flexShrink={0}>
             <RepoSwitcher

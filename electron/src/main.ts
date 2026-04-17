@@ -63,7 +63,7 @@ async function createWindow(): Promise<void> {
   const win = new BrowserWindow({
     width: 1480,
     height: 940,
-    title: "Calypso Multi-Agent",
+    title: "Shipyard",
     backgroundColor: "#0a0c10",
     webPreferences: {
       contextIsolation: true,

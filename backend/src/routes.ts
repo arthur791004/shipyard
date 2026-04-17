@@ -243,7 +243,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     try {
       const res = await run("osascript", [
         "-e",
-        'POSIX path of (choose folder with prompt "Select Calypso repo folder")',
+        'POSIX path of (choose folder with prompt "Select repo folder")',
       ]);
       if (res.code !== 0) return reply.code(204).send();
       const raw = res.stdout.trim();

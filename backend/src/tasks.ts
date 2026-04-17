@@ -40,7 +40,7 @@ export async function appendTaskEntry(slug: string, entry: TaskFileEntry): Promi
 // Inject a task section into the worktree's CLAUDE.md so Claude reads it
 // automatically on startup. Appends a fenced section at the end; if the
 // file already has our marker, it replaces the section in-place.
-const TASK_MARKER = "<!-- calypso-multi-agent:task -->";
+const TASK_MARKER = "<!-- shipyard:task -->";
 
 export async function injectTaskIntoClaudeMd(
   worktreePath: string,
