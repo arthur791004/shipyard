@@ -367,14 +367,6 @@ export function App() {
     );
   }
 
-  // Backend cap counts only sandbox VMs; trunk runs as a dashboard process and
-  // isn't a sandbox. Display-side we add 1 so the user sees trunk included in
-  // the totals.
-  const sandboxCap = settings?.maxConcurrentSandboxes ?? 9;
-  const cap = sandboxCap + 1;
-  const runningCount = branches.filter((b) => b.status === "running").length;
-  const runningSandboxCount = branches.filter((b) => !b.isTrunk && b.status === "running").length;
-  const atCap = runningSandboxCount >= sandboxCap;
   const trunk = branches.find((b) => b.isTrunk);
   const activeRepoName = repos.find((r) => r.id === activeRepoId)?.name;
   const sessionTasks: Task[] = (() => {
@@ -469,66 +461,33 @@ export function App() {
       >
         <Flex
           px={4}
-          h="64px"
+          h="48px"
           borderBottomWidth={1}
           borderColor="gray.800"
           align="center"
-          gap={3}
+          gap={2}
           overflow="hidden"
           flexShrink={0}
         >
-          <HStack gap={2} flex="1" minW={0}>
-            <Heading size="sm" truncate>Tasks</Heading>
-            <Tooltip.Root openDelay={300}>
-              <Tooltip.Trigger asChild>
-                <Button
-                  aria-label="New task"
-                  variant="ghost"
-                  size="xs"
-                  px={1}
-                  onClick={() => {
-                    commandInputRef.current?.focus();
-                    setCommandText("/");
-                  }}
-                >
-                  +
-                </Button>
-              </Tooltip.Trigger>
-              <Portal>
-                <Tooltip.Positioner>
-                  <Tooltip.Content>New task (⌘P)</Tooltip.Content>
-                </Tooltip.Positioner>
-              </Portal>
-            </Tooltip.Root>
-          </HStack>
-          <Box flexShrink={0}>
-            <RepoSwitcher
-              repos={repos}
-              activeRepoId={activeRepoId}
-              onChanged={async () => {
-                setBranchesLoaded(false);
-                setBranches([]);
-                await refreshRepos();
-                await refresh();
-              }}
-            />
-          </Box>
+          <Heading size="sm" flex="1">Tasks</Heading>
           <Tooltip.Root openDelay={300}>
             <Tooltip.Trigger asChild>
               <Button
-                aria-label="Settings"
+                aria-label="New task"
                 variant="ghost"
                 size="xs"
                 px={1}
-                flexShrink={0}
-                onClick={settingsDisclosure.onOpen}
+                onClick={() => {
+                  commandInputRef.current?.focus();
+                  setCommandText("/");
+                }}
               >
-                <GearIcon />
+                +
               </Button>
             </Tooltip.Trigger>
             <Portal>
               <Tooltip.Positioner>
-                <Tooltip.Content>Settings</Tooltip.Content>
+                <Tooltip.Content>New task (⌘P)</Tooltip.Content>
               </Tooltip.Positioner>
             </Portal>
           </Tooltip.Root>
@@ -563,20 +522,43 @@ export function App() {
           )}
         </Box>
 
-        <Flex justify="flex-end" px={4} py={1}>
+        <Flex
+          px={4}
+          py={2}
+          borderTopWidth={1}
+          borderColor="gray.800"
+          align="center"
+          gap={2}
+          flexShrink={0}
+        >
+          <Box flex="1" minW={0}>
+            <RepoSwitcher
+              repos={repos}
+              activeRepoId={activeRepoId}
+              onChanged={async () => {
+                setBranchesLoaded(false);
+                setBranches([]);
+                await refreshRepos();
+                await refresh();
+              }}
+            />
+          </Box>
           <Tooltip.Root openDelay={300}>
             <Tooltip.Trigger asChild>
-              <Text
-                fontSize="2xs"
-                color={runningCount >= cap ? "orange.400" : "gray.600"}
-                fontVariantNumeric="tabular-nums"
+              <Button
+                aria-label="Settings"
+                variant="ghost"
+                size="xs"
+                px={1}
+                flexShrink={0}
+                onClick={settingsDisclosure.onOpen}
               >
-                {runningCount}/{cap} running
-              </Text>
+                <GearIcon />
+              </Button>
             </Tooltip.Trigger>
             <Portal>
               <Tooltip.Positioner>
-                <Tooltip.Content>Running sandboxes / concurrency cap</Tooltip.Content>
+                <Tooltip.Content>Settings</Tooltip.Content>
               </Tooltip.Positioner>
             </Portal>
           </Tooltip.Root>
@@ -712,7 +694,7 @@ export function App() {
                   ref={commandInputRef}
                   size="sm"
                   fontFamily="mono"
-                  placeholder={atCap ? "At sandbox cap" : "Type a message or /command... (⌘P)"}
+                  placeholder="Type a message or /command... (⌘P)"
                   value={commandText}
                   onFocus={() => setCommandInputFocused(true)}
                   onBlur={() => setCommandInputFocused(false)}
@@ -742,14 +724,14 @@ export function App() {
                     }
                     if (e.key === "Enter") onRunCommand();
                   }}
-                  disabled={commandBusy || atCap}
+                  disabled={commandBusy}
                 />
                 <Button
                   size="sm"
                   colorPalette="blue"
                   onClick={onRunCommand}
                   loading={commandBusy}
-                  disabled={!commandText.trim() || atCap}
+                  disabled={!commandText.trim()}
                   flexShrink={0}
                 >
                   Send

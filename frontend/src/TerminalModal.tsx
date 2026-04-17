@@ -176,7 +176,7 @@ export function TerminalModal({
         justify="space-between"
         align="center"
         px={4}
-        h="64px"
+        h="48px"
         flexShrink={0}
         gap={4}
         borderBottomWidth={1}
