@@ -469,7 +469,7 @@ export function App() {
           overflow="hidden"
           flexShrink={0}
         >
-          <Heading size="sm" flex="1">Tasks</Heading>
+          <Heading size="sm" flex="1">Shipyard</Heading>
           <Tooltip.Root openDelay={300}>
             <Tooltip.Trigger asChild>
               <Button
@@ -521,48 +521,6 @@ export function App() {
             </Stack>
           )}
         </Box>
-
-        <Flex
-          px={4}
-          py={2}
-          borderTopWidth={1}
-          borderColor="gray.800"
-          align="center"
-          gap={2}
-          flexShrink={0}
-        >
-          <Box flex="1" minW={0}>
-            <RepoSwitcher
-              repos={repos}
-              activeRepoId={activeRepoId}
-              onChanged={async () => {
-                setBranchesLoaded(false);
-                setBranches([]);
-                await refreshRepos();
-                await refresh();
-              }}
-            />
-          </Box>
-          <Tooltip.Root openDelay={300}>
-            <Tooltip.Trigger asChild>
-              <Button
-                aria-label="Settings"
-                variant="ghost"
-                size="xs"
-                px={1}
-                flexShrink={0}
-                onClick={settingsDisclosure.onOpen}
-              >
-                <GearIcon />
-              </Button>
-            </Tooltip.Trigger>
-            <Portal>
-              <Tooltip.Positioner>
-                <Tooltip.Content>Settings</Tooltip.Content>
-              </Tooltip.Positioner>
-            </Portal>
-          </Tooltip.Root>
-        </Flex>
 
       </Flex>
 
@@ -647,8 +605,15 @@ export function App() {
         </Box>
 
         {activeRepoId && (
-          <Box px={4} py={3} borderTopWidth={1} borderColor="gray.800">
-            <Box position="relative">
+          <Box px={4} py={3} flexShrink={0}>
+            <Box
+              position="relative"
+              borderWidth={1}
+              borderColor={commandInputFocused ? "blue.500" : "gray.700"}
+              borderRadius="lg"
+              bg="gray.900"
+              transition="border-color 120ms"
+            >
               {commandMenuItems.length > 0 && (
                 <Box
                   position="absolute"
@@ -689,53 +654,84 @@ export function App() {
                   ))}
                 </Box>
               )}
-              <HStack gap={2}>
-                <Input
-                  ref={commandInputRef}
-                  size="sm"
-                  fontFamily="mono"
-                  placeholder="Type a message or /command... (⌘P)"
-                  value={commandText}
-                  onFocus={() => setCommandInputFocused(true)}
-                  onBlur={() => setCommandInputFocused(false)}
-                  onChange={(e) => {
-                    setCommandText(e.target.value);
-                    setCommandMenuIndex(0);
-                  }}
-                  onKeyDown={(e) => {
-                    if (commandMenuItems.length > 0) {
-                      if (e.key === "ArrowDown") {
-                        e.preventDefault();
-                        setCommandMenuIndex((i) => (i + 1) % commandMenuItems.length);
-                        return;
-                      }
-                      if (e.key === "ArrowUp") {
-                        e.preventDefault();
-                        setCommandMenuIndex(
-                          (i) => (i - 1 + commandMenuItems.length) % commandMenuItems.length
-                        );
-                        return;
-                      }
-                      if (e.key === "Enter" || e.key === "Tab") {
-                        e.preventDefault();
-                        pickCommand(commandMenuItems[clampedMenuIndex].prefix);
-                        return;
-                      }
+              <Input
+                ref={commandInputRef}
+                fontFamily="mono"
+                placeholder="Type a message or /command... (⌘P)"
+                value={commandText}
+                onFocus={() => setCommandInputFocused(true)}
+                onBlur={() => setCommandInputFocused(false)}
+                onChange={(e) => {
+                  setCommandText(e.target.value);
+                  setCommandMenuIndex(0);
+                }}
+                onKeyDown={(e) => {
+                  if (commandMenuItems.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setCommandMenuIndex((i) => (i + 1) % commandMenuItems.length);
+                      return;
                     }
-                    if (e.key === "Enter") onRunCommand();
-                  }}
-                  disabled={commandBusy}
-                />
-                <Button
-                  size="sm"
-                  colorPalette="blue"
-                  onClick={onRunCommand}
-                  loading={commandBusy}
-                  disabled={!commandText.trim()}
-                  flexShrink={0}
-                >
-                  Send
-                </Button>
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setCommandMenuIndex(
+                        (i) => (i - 1 + commandMenuItems.length) % commandMenuItems.length
+                      );
+                      return;
+                    }
+                    if (e.key === "Enter" || e.key === "Tab") {
+                      e.preventDefault();
+                      pickCommand(commandMenuItems[clampedMenuIndex].prefix);
+                      return;
+                    }
+                  }
+                  if (e.key === "Enter") onRunCommand();
+                }}
+                disabled={commandBusy}
+                border="none"
+                outline="none"
+                _focus={{ boxShadow: "none", outline: "none", borderColor: "transparent" }}
+                _focusVisible={{ boxShadow: "none", outline: "none" }}
+                px={4}
+                pt={4}
+                pb={2}
+                fontSize="sm"
+              />
+              <HStack gap={3} px={3} pb={3} justify="flex-end">
+                <Box minW={0}>
+                  <RepoSwitcher
+                    repos={repos}
+                    activeRepoId={activeRepoId}
+                    onChanged={async () => {
+                      setBranchesLoaded(false);
+                      setBranches([]);
+                      await refreshRepos();
+                      await refresh();
+                    }}
+                    onSettings={settingsDisclosure.onOpen}
+                  />
+                </Box>
+                <Tooltip.Root openDelay={300}>
+                  <Tooltip.Trigger asChild>
+                    <Button
+                      aria-label="Send"
+                      size="sm"
+                      colorPalette="blue"
+                      onClick={onRunCommand}
+                      loading={commandBusy}
+                      disabled={!commandText.trim()}
+                      flexShrink={0}
+                      px={2}
+                    >
+                      <SendIcon />
+                    </Button>
+                  </Tooltip.Trigger>
+                  <Portal>
+                    <Tooltip.Positioner>
+                      <Tooltip.Content>Send (Enter)</Tooltip.Content>
+                    </Tooltip.Positioner>
+                  </Portal>
+                </Tooltip.Root>
               </HStack>
             </Box>
           </Box>
@@ -945,6 +941,15 @@ export function App() {
         }}
       />
     </Flex>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M22 2L11 13" />
+      <path d="M22 2L15 22L11 13L2 9L22 2Z" />
+    </svg>
   );
 }
 

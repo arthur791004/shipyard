@@ -28,9 +28,10 @@ interface Props {
   repos: Repo[];
   activeRepoId?: string;
   onChanged: () => void;
+  onSettings?: () => void;
 }
 
-export function RepoSwitcher({ repos, activeRepoId, onChanged }: Props) {
+export function RepoSwitcher({ repos, activeRepoId, onChanged, onSettings }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const active = repos.find((r) => r.id === activeRepoId);
 
@@ -77,7 +78,7 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged }: Props) {
   return (
     <Menu.Root>
       <Menu.Trigger asChild>
-        <Button size="sm" variant="outline" minW="0" maxW="140px" justifyContent="space-between">
+        <Button size="sm" variant="ghost" minW="0" maxW="160px" justifyContent="space-between">
           <HStack gap={2} minW={0}>
             {busy === "activate" && <Spinner size="xs" />}
             <Text truncate fontFamily="mono" fontSize="sm">
@@ -109,6 +110,18 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged }: Props) {
                     )}
                   </HStack>
                   <HStack gap={1}>
+                    {onSettings && r.id === activeRepoId && (
+                      <Button
+                        size="2xs"
+                        variant="ghost"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSettings();
+                        }}
+                      >
+                        ⚙
+                      </Button>
+                    )}
                     <Button
                       size="2xs"
                       variant="ghost"
