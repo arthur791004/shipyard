@@ -11,6 +11,19 @@ import {
 import { api, Repo } from "./api";
 import { toaster } from "./Toaster";
 
+async function syncRepo(repo: Repo, onChanged: () => void, setBusy: (s: string | null) => void) {
+  setBusy(`sync:${repo.id}`);
+  try {
+    await api.syncRepo(repo.id);
+    toaster.create({ type: "info", title: `${repo.name} synced`, duration: 2000 });
+    onChanged();
+  } catch (e: any) {
+    toaster.create({ type: "error", title: e.message, duration: 6000 });
+  } finally {
+    setBusy(null);
+  }
+}
+
 interface Props {
   repos: Repo[];
   activeRepoId?: string;
@@ -95,18 +108,31 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged }: Props) {
                       </Badge>
                     )}
                   </HStack>
-                  <Button
-                    size="2xs"
-                    variant="ghost"
-                    colorPalette="red"
-                    loading={busy === `remove:${r.id}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeRepo(r);
-                    }}
-                  >
-                    ✕
-                  </Button>
+                  <HStack gap={1}>
+                    <Button
+                      size="2xs"
+                      variant="ghost"
+                      loading={busy === `sync:${r.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        syncRepo(r, onChanged, setBusy);
+                      }}
+                    >
+                      ↻
+                    </Button>
+                    <Button
+                      size="2xs"
+                      variant="ghost"
+                      colorPalette="red"
+                      loading={busy === `remove:${r.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRepo(r);
+                      }}
+                    >
+                      ✕
+                    </Button>
+                  </HStack>
                 </HStack>
               </Menu.Item>
             ))}

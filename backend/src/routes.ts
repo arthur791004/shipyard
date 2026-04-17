@@ -67,6 +67,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // --branch ensures we clone the default branch regardless of what
     // the source repo currently has checked out.
     await runOrThrow("git", ["clone", "--local", "--branch", branch, sourceRepo, repoPath]);
+    // The clone's origin points to the local checkout. Add the real
+    // remote so `git fetch` / `git pull` gets latest from GitHub.
+    const upstreamRes = await run("git", ["-C", sourceRepo, "remote", "get-url", "origin"]);
+    if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) {
+      const upstream = upstreamRes.stdout.trim();
+      await run("git", ["-C", repoPath, "remote", "set-url", "origin", upstream]);
+      // Keep the local checkout as a named remote for fast local fetches.
+      await run("git", ["-C", repoPath, "remote", "add", "local", sourceRepo]);
+    }
   }
 
   app.get("/api/settings", async () => {
@@ -722,6 +731,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return { url, created: true };
     } catch (err: any) {
       return reply.code(500).send({ error: `gh pr create failed: ${err.message}` });
+    }
+  });
+
+  // Pull latest changes from origin into the clone's default branch.
+  app.post<{ Params: { id: string } }>("/api/repos/:id/sync", async (req, reply) => {
+    const repo = getRepo(req.params.id);
+    if (!repo) return reply.code(404).send({ error: "repo not found" });
+    try {
+      // Fetch from origin (the real remote, e.g. GitHub)
+      await runOrThrow("git", ["-C", repo.repoPath, "fetch", "origin"]);
+      // Also fetch from the local checkout for any unpushed local work
+      await run("git", ["-C", repo.repoPath, "fetch", "local"]);
+      // Fast-forward the default branch
+      await runOrThrow("git", ["-C", repo.repoPath, "pull", "--ff-only", "origin", repo.defaultBranch]);
+      return { ok: true };
+    } catch (err: any) {
+      return reply.code(500).send({ error: `sync failed: ${err.message}` });
     }
   });
 

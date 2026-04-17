@@ -130,5 +130,7 @@ export const api = {
     fetch(`/api/branches/${encodeURIComponent(id)}/push`, { method: "POST" }).then(
       j<{ url: string; created: boolean }>
     ),
+  syncRepo: (id: string) =>
+    fetch(`/api/repos/${id}/sync`, { method: "POST" }).then(j<{ ok: true }>),
   sessions: () => fetch("/api/sessions").then(j<{ sessions: Session[] }>),
 };
