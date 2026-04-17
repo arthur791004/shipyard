@@ -14,6 +14,7 @@ interface Props {
   onKindChange: (kind: TerminalKind) => void;
   onClose: () => void;
   onPreview: (b: Branch) => void;
+  onPreviewInline?: (b: Branch) => void;
   onOpenEditor: (b: Branch) => void;
   onRefresh: (b: Branch) => void;
   onHardRefresh: (b: Branch) => void;
@@ -30,6 +31,7 @@ export function TerminalModal({
   onKindChange,
   onClose,
   onPreview,
+  onPreviewInline,
   onOpenEditor,
   onRefresh,
   onHardRefresh,
@@ -41,10 +43,12 @@ export function TerminalModal({
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalDisabled = !branch.isTrunk && branch.status !== "running";
   const [reloadMenu, setReloadMenu] = useState<{ x: number; y: number } | null>(null);
+  const [previewMenu, setPreviewMenu] = useState(false);
 
   useEffect(() => {
-    if (!reloadMenu) return;
-    const close = () => setReloadMenu(null);
+    const open = reloadMenu || previewMenu;
+    if (!open) return;
+    const close = () => { setReloadMenu(null); setPreviewMenu(false); };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", onKey);
@@ -52,7 +56,7 @@ export function TerminalModal({
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", onKey);
     };
-  }, [reloadMenu]);
+  }, [reloadMenu, previewMenu]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -275,13 +279,64 @@ export function TerminalModal({
               <PushIcon />
             </IconButton>
           )}
-          <IconButton
-            label="Preview"
-            onClick={(_e) => onPreview(branch)}
-            disabled={branch.status !== "running"}
+          <Box
+            position="relative"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setPreviewMenu(true);
+            }}
           >
-            <PreviewIcon />
-          </IconButton>
+            <IconButton
+              label="Preview"
+              onClick={(_e) => onPreview(branch)}
+              disabled={branch.status !== "running"}
+            >
+              <PreviewIcon />
+            </IconButton>
+            {previewMenu && (
+                <Box
+                  position="absolute"
+                  right={0}
+                  top="100%"
+                  mt={1}
+                  zIndex={1000}
+                  bg="gray.900"
+                  borderWidth={1}
+                  borderColor="gray.700"
+                  borderRadius="md"
+                  boxShadow="lg"
+                  minW="160px"
+                  py={1}
+                >
+                  <Button
+                    w="100%"
+                    size="sm"
+                    variant="ghost"
+                    justifyContent="flex-start"
+                    borderRadius={0}
+                    _hover={{ bg: "gray.800" }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => { setPreviewMenu(false); onPreview(branch); }}
+                  >
+                    Open in new tab
+                  </Button>
+                  {onPreviewInline && (
+                    <Button
+                      w="100%"
+                      size="sm"
+                      variant="ghost"
+                      justifyContent="flex-start"
+                      borderRadius={0}
+                      _hover={{ bg: "gray.800" }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => { setPreviewMenu(false); onPreviewInline(branch); }}
+                    >
+                      Open in panel
+                    </Button>
+                  )}
+                </Box>
+            )}
+          </Box>
           {!isMobile && (
             <IconButton
               label="Open in editor"

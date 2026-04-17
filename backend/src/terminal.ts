@@ -3,7 +3,7 @@ import pty, { IPty } from "node-pty";
 import { getBranch, getRepo, isTrunk } from "./state.js";
 import { attachBranchSession, resolveDockerPath } from "./sandbox.js";
 import { attachSharedPty, ensureSharedPty } from "./sharedPty.js";
-import { dashboardKey, ensureDashboardRunning } from "./dashboard.js";
+import { dashboardKey, dashboardLogFile, ensureDashboardRunning } from "./dashboard.js";
 
 export async function registerTerminal(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string }; Querystring: { kind?: string } }>(
@@ -27,11 +27,15 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
           : "claude";
 
       if (kind === "dashboard") {
+        const logOpts = { logFile: dashboardLogFile(branch.worktreePath) };
         const onData = (data: string) => {
           try { socket.send(data); } catch {}
         };
-        let handle = attachSharedPty(dashboardKey(branch.worktreePath), onData);
+        // Try attaching — replays from log file even if PTY is dead
+        let handle = attachSharedPty(dashboardKey(branch.worktreePath), onData, logOpts);
         if (!handle) {
+          // No live PTY (log file was replayed above if it existed).
+          // Start the dashboard and attach to the fresh PTY.
           try {
             await ensureDashboardRunning(branch.worktreePath, branch.port);
           } catch (err) {

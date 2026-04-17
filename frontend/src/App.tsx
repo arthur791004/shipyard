@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Box,
+  Button,
   Flex,
+  HStack,
   Portal,
+  Text,
   useBreakpointValue,
   useDisclosure,
 } from "@chakra-ui/react";
@@ -53,6 +56,8 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarAnimated, setSidebarAnimated] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [previewPanel, setPreviewPanel] = useState<{ src: string; url: string } | null>(null);
+  const [previewViewport, setPreviewViewport] = useState<"desktop" | "mobile">("desktop");
 
   // Close mobile dropdown on outside click or Escape
   const mobileMenuRef = useRef<HTMLDivElement>(null);
@@ -93,14 +98,29 @@ export function App() {
 
   // --- Branch actions ---
 
+  async function startPreview(b: Branch): Promise<string> {
+    await api.switch(b.id);
+    setActiveId(b.id);
+    await api.startDashboard(b.id);
+    const repo = repos.find((r) => r.id === b.repoId);
+    return repo?.previewUrl?.trim() || "http://my.localhost:3000";
+  }
+
   async function onPreview(b: Branch) {
     await withPending(b.id, "preview", async () => {
-      await api.switch(b.id);
-      setActiveId(b.id);
-      await api.startDashboard(b.id);
-      const repo = repos.find((r) => r.id === b.repoId);
-      const url = repo?.previewUrl?.trim() || "http://my.localhost:3000";
+      const url = await startPreview(b);
       window.open(url, "_blank");
+    });
+  }
+
+  async function onPreviewInline(b: Branch) {
+    await withPending(b.id, "preview", async () => {
+      const url = await startPreview(b);
+      // Use the same preview URL (branchProxy) for the iframe.
+      // startPreview already called api.switch() to set this branch as active.
+      // Cross-origin iframes are allowed — the browser only restricts JS
+      // access between origins, not loading the iframe itself.
+      setPreviewPanel({ src: url, url });
     });
   }
 
@@ -165,6 +185,7 @@ export function App() {
   function onSelectTask(b: Branch) {
     if (!terminalPanel || terminalPanel.branch.id !== b.id) {
       setTerminalPanel({ branch: b, kind: "claude" });
+      setPreviewPanel(null);
     }
     const needsStart = !b.isTrunk && (b.status === "stopped" || b.status === "error");
     if (needsStart) {
@@ -250,58 +271,166 @@ export function App() {
       )}
 
       {/* Right panel */}
-      <Flex direction="column" flex="1" minW={0} overflow="hidden" bg="#000" position="relative">
-        <Box flex="1" overflow="hidden" position="relative">
-          {terminalPanel ? (() => {
-            const liveBranch =
-              branches.find((b) => b.id === terminalPanel.branch.id) ?? terminalPanel.branch;
-            return (
-              <TerminalModal
-                key={`${liveBranch.id}:${terminalPanel.kind}:${liveBranch.status}`}
-                branch={liveBranch}
-                kind={terminalPanel.kind}
-                isMobile={isMobile}
-                onKindChange={(kind) =>
-                  setTerminalPanel((prev) => (prev ? { ...prev, kind } : prev))
-                }
-                onClose={() => setTerminalPanel(null)}
-                onPreview={onPreview}
-                onOpenEditor={onOpenEditor}
-                onRefresh={(b) => onRefreshSandbox(b)}
-                writeRef={terminalWriteRef}
-                onHardRefresh={(b) => onRefreshSandbox(b, true)}
-                onPush={(b) => onPushAndPR(b)}
-                sidebarCollapsed={sidebarCollapsed}
-                onToggleSidebar={() => {
-                  if (isMobile) {
-                    setMobileMenuOpen((v) => !v);
-                  } else {
-                    setSidebarAnimated(true);
-                    setSidebarCollapsed((v) => !v);
+      <Flex flex="1" minW={0} overflow="hidden" bg="#000" position="relative">
+        <Flex direction="column" flex="1" minW={0} overflow="hidden">
+          <Box flex="1" overflow="hidden" position="relative">
+            {terminalPanel ? (() => {
+              const liveBranch =
+                branches.find((b) => b.id === terminalPanel.branch.id) ?? terminalPanel.branch;
+              return (
+                <TerminalModal
+                  key={`${liveBranch.id}:${terminalPanel.kind}:${liveBranch.status}`}
+                  branch={liveBranch}
+                  kind={terminalPanel.kind}
+                  isMobile={isMobile}
+                  onKindChange={(kind) =>
+                    setTerminalPanel((prev) => (prev ? { ...prev, kind } : prev))
                   }
-                }}
+                  onClose={() => setTerminalPanel(null)}
+                  onPreview={onPreview}
+                  onPreviewInline={!isMobile ? onPreviewInline : undefined}
+                  onOpenEditor={onOpenEditor}
+                  onRefresh={(b) => onRefreshSandbox(b)}
+                  writeRef={terminalWriteRef}
+                  onHardRefresh={(b) => onRefreshSandbox(b, true)}
+                  onPush={(b) => onPushAndPR(b)}
+                  sidebarCollapsed={sidebarCollapsed}
+                  onToggleSidebar={() => {
+                    if (isMobile) {
+                      setMobileMenuOpen((v) => !v);
+                    } else {
+                      setSidebarAnimated(true);
+                      setSidebarCollapsed((v) => !v);
+                    }
+                  }}
+                />
+              );
+            })() : (
+              <NewChatView
+                isMobile={isMobile}
+                sidebarCollapsed={sidebarCollapsed}
+                trunk={trunk}
+                sessionTasks={sessionTasks}
+                activeRepoId={activeRepoId}
+                branches={branches}
+                sessions={sessions}
+                commandInputRef={commandInputRef}
+                onToggleSidebar={() => { setSidebarAnimated(true); setSidebarCollapsed(false); }}
+                onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
+                onNewChat={handleNewChat}
+                onSelectTask={handleSelectFromDropdown}
+                onCreated={(branch) => setTerminalPanel({ branch, kind: "claude" })}
+                onRefresh={refresh}
+                onSessionsRefresh={refreshSessions}
               />
-            );
-          })() : (
-            <NewChatView
-              isMobile={isMobile}
-              sidebarCollapsed={sidebarCollapsed}
-              trunk={trunk}
-              sessionTasks={sessionTasks}
-              activeRepoId={activeRepoId}
-              branches={branches}
-              sessions={sessions}
-              commandInputRef={commandInputRef}
-              onToggleSidebar={() => { setSidebarAnimated(true); setSidebarCollapsed(false); }}
-              onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
-              onNewChat={handleNewChat}
-              onSelectTask={handleSelectFromDropdown}
-              onCreated={(branch) => setTerminalPanel({ branch, kind: "claude" })}
-              onRefresh={refresh}
-              onSessionsRefresh={refreshSessions}
-            />
-          )}
-        </Box>
+            )}
+          </Box>
+        </Flex>
+
+        {/* Inline preview panel */}
+        {previewPanel && !isMobile && (
+          <Flex
+            direction="column"
+            w="50%"
+            maxW="50%"
+            minW="300px"
+            h="100%"
+            borderLeftWidth={1}
+            borderColor="gray.800"
+          >
+            <Flex
+              h="48px"
+              px={4}
+              align="center"
+              justify="space-between"
+              flexShrink={0}
+              borderBottomWidth={1}
+              borderColor="gray.800"
+            >
+              <HStack gap={2} minW={0} flex="1">
+                <PreviewPanelIcon />
+                <Text fontSize="sm" color="gray.400" truncate>{previewPanel.url}</Text>
+              </HStack>
+              <HStack gap={1}>
+                <Button
+                  size="sm"
+                  variant={previewViewport === "desktop" ? "solid" : "ghost"}
+                  px={2}
+                  aria-label="Desktop viewport"
+                  onClick={() => setPreviewViewport("desktop")}
+                >
+                  <DesktopIcon />
+                </Button>
+                <Button
+                  size="sm"
+                  variant={previewViewport === "mobile" ? "solid" : "ghost"}
+                  px={2}
+                  aria-label="Mobile viewport"
+                  onClick={() => setPreviewViewport("mobile")}
+                >
+                  <MobileIcon />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  px={2}
+                  aria-label="Open in new tab"
+                  onClick={() => window.open(previewPanel.url, "_blank")}
+                >
+                  <ExternalLinkIcon />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  px={2}
+                  aria-label="Refresh preview"
+                  onClick={() => {
+                    const p = previewPanel;
+                    setPreviewPanel(null);
+                    setTimeout(() => setPreviewPanel(p), 0);
+                  }}
+                >
+                  <RefreshPanelIcon />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  px={2}
+                  aria-label="Close preview"
+                  onClick={() => setPreviewPanel(null)}
+                >
+                  <CloseIcon />
+                </Button>
+              </HStack>
+            </Flex>
+            <Flex
+              flex="1"
+              bg="gray.950"
+              align={previewViewport === "mobile" ? "start" : "stretch"}
+              justify={previewViewport === "mobile" ? "center" : "flex-start"}
+              overflow="auto"
+            >
+              <Box
+                w={previewViewport === "mobile" ? "375px" : "100%"}
+                minW={previewViewport === "desktop" ? "1280px" : undefined}
+                h={previewViewport === "mobile" ? "812px" : "auto"}
+                minH={previewViewport === "desktop" ? "100%" : undefined}
+                bg="white"
+                borderRadius={previewViewport === "mobile" ? "md" : 0}
+                overflow="hidden"
+                mt={previewViewport === "mobile" ? 4 : 0}
+                flexShrink={0}
+                boxShadow={previewViewport === "mobile" ? "0 0 0 1px var(--chakra-colors-gray-700)" : "none"}
+              >
+                <iframe
+                  src={previewPanel.src}
+                  style={{ width: "100%", height: "100%", border: "none" }}
+                  title="Preview"
+                />
+              </Box>
+            </Flex>
+          </Flex>
+        )}
       </Flex>
 
       {/* Mobile sidebar dropdown overlay */}
@@ -365,5 +494,63 @@ export function App() {
         }}
       />
     </Flex>
+  );
+}
+
+function PreviewPanelIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
+  );
+}
+
+function RefreshPanelIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 2v6h-6" />
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M3 22v-6h6" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function DesktopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </svg>
+  );
+}
+
+function MobileIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="5" y="2" width="14" height="20" rx="2" />
+      <line x1="12" y1="18" x2="12" y2="18" />
+    </svg>
   );
 }

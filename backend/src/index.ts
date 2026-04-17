@@ -117,6 +117,11 @@ async function main() {
         ...headers,
         host: req.headers.host ?? headers.host,
       }),
+      rewriteHeaders: (headers: any) => {
+        // Strip X-Frame-Options so the preview can be embedded in an iframe
+        delete headers["x-frame-options"];
+        return headers;
+      },
       onError: (reply: any, _details: any) => {
         reply.code(503).type("text/html").send(
           `<h3>Dashboard not ready</h3><p>The dev server is still starting inside the sandbox. Refresh in a moment.</p>`
