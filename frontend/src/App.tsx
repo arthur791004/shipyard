@@ -117,6 +117,27 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarHover, setSidebarHover] = useState(false);
   const [sidebarAnimated, setSidebarAnimated] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Close mobile dropdown on outside click or Escape
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (mobileMenuRef.current && !mobileMenuRef.current.contains(e.target as Node)) {
+        setMobileMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [mobileMenuOpen]);
 
   const commandInputRef = useRef<HTMLInputElement>(null);
 
@@ -129,6 +150,7 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === "p") {
         e.preventDefault();
         setTerminalPanel(null);
+        setMobileMenuOpen(false);
         setTimeout(() => commandInputRef.current?.focus(), 100);
         return;
       }
@@ -342,8 +364,8 @@ export function App() {
   })();
   const tasks: Task[] = trunk ? [{ branch: trunk }, ...sessionTasks] : sessionTasks;
 
-  const showLeft = !isMobile || !terminalPanel;
-  const showRight = !isMobile || !!terminalPanel;
+  const showLeft = !isMobile;
+  const showRight = true;
 
   function renderInputCard() {
     if (!activeRepoId) return null;
@@ -363,7 +385,7 @@ export function App() {
               left={0}
               right={0}
               bottom="100%"
-              mb={1}
+              mb={3}
               borderWidth={1}
               borderColor="gray.700"
               borderRadius="md"
@@ -447,6 +469,7 @@ export function App() {
                   aria-label="Send"
                   size="sm"
                   colorPalette="blue"
+                  borderRadius="full"
                   onClick={onRunCommand}
                   loading={commandBusy}
                   disabled={!commandText.trim()}
@@ -465,7 +488,7 @@ export function App() {
           </HStack>
         </Box>
         {!terminalPanel && (
-          <HStack gap={2} mt={3} justify="center" flexWrap="wrap">
+          <HStack gap={3} mt={6} justify="center" flexWrap="wrap">
             {[
               { label: "/gh-issue", prefix: "/gh-issue " },
               { label: "/linear", prefix: "/linear " },
@@ -704,7 +727,7 @@ export function App() {
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={() => {
                 if (isMobile) {
-                  closeTerminal();
+                  setMobileMenuOpen((v) => !v);
                 } else {
                   setSidebarAnimated(true);
                   setSidebarCollapsed((v) => !v);
@@ -716,18 +739,24 @@ export function App() {
             <Flex direction="column" h="100%">
               {/* Header */}
               <Flex h="48px" px={3} align="center" flexShrink={0} gap={2}>
-                {sidebarCollapsed && (
+                {(isMobile || sidebarCollapsed) && (
                   <Box
                     position="relative"
-                    onMouseEnter={() => setSidebarHover(true)}
-                    onMouseLeave={() => setSidebarHover(false)}
+                    onMouseEnter={() => { if (!isMobile) setSidebarHover(true); }}
+                    onMouseLeave={() => { if (!isMobile) setSidebarHover(false); }}
                   >
                     <Button
                       aria-label="Toggle sidebar"
                       variant="ghost"
                       size="xs"
                       px={1}
-                      onClick={() => setSidebarCollapsed(false)}
+                      onClick={() => {
+                        if (isMobile) {
+                          setMobileMenuOpen((v) => !v);
+                        } else {
+                          setSidebarCollapsed(false);
+                        }
+                      }}
                     >
                       <SidebarIcon />
                     </Button>
@@ -837,6 +866,99 @@ export function App() {
         </Box>
 
       </Flex>
+
+      {/* Mobile sidebar dropdown overlay */}
+      {isMobile && mobileMenuOpen && (
+        <Portal>
+          <Box
+            ref={mobileMenuRef}
+            position="fixed"
+            top="48px"
+            left={0}
+            w={`${SIDEBAR_WIDTH}px`}
+            maxH="calc(100vh - 60px)"
+            overflowY="auto"
+            bg="gray.900"
+            borderWidth={1}
+            borderColor="gray.700"
+            borderRadius="md"
+            boxShadow="lg"
+            p={3}
+            zIndex={30}
+            ml={2}
+          >
+            {/* New chat */}
+            <Box
+              px={3}
+              py={2}
+              borderRadius="md"
+              cursor="pointer"
+              _hover={{ bg: "gray.800" }}
+              onClick={() => {
+                setTerminalPanel(null);
+                setMobileMenuOpen(false);
+                setTimeout(() => commandInputRef.current?.focus(), 100);
+              }}
+            >
+              <HStack gap={2}>
+                <NewChatIcon />
+                <Text fontFamily="mono" fontSize="sm" flex="1">New chat</Text>
+                <Badge colorPalette="gray" variant="subtle" fontSize="2xs">⌘P</Badge>
+              </HStack>
+            </Box>
+
+            {/* Trunk */}
+            {trunk && (
+              <Box
+                px={3}
+                py={2}
+                borderRadius="md"
+                cursor="pointer"
+                bg={terminalPanel?.branch.id === trunk.id ? "gray.800" : undefined}
+                _hover={{ bg: "gray.800" }}
+                onClick={() => {
+                  onSelectTask(trunk);
+                  setMobileMenuOpen(false);
+                }}
+              >
+                <HStack gap={2}>
+                  <DashboardIcon />
+                  <Text fontFamily="mono" fontSize="sm" flex="1" truncate>Dashboard</Text>
+                  <Badge colorPalette="gray" variant="subtle" fontSize="2xs">{trunk.name}</Badge>
+                </HStack>
+              </Box>
+            )}
+
+            {/* Chats */}
+            {sessionTasks.length > 0 && (
+              <Text fontSize="xs" fontWeight="semibold" color="gray.500" pt={2} pb={1} px={3}>Chats</Text>
+            )}
+            <Stack gap={0}>
+              {sessionTasks.map((t: any) => (
+                <Box
+                  key={t.session?.id ?? t.branch?.id ?? "t"}
+                  px={3}
+                  py={2}
+                  borderRadius="md"
+                  cursor="pointer"
+                  bg={t.branch && terminalPanel?.branch.id === t.branch.id ? "gray.800" : undefined}
+                  _hover={{ bg: "gray.800" }}
+                  onClick={() => {
+                    if (t.branch) {
+                      onSelectTask(t.branch);
+                      setMobileMenuOpen(false);
+                    }
+                  }}
+                >
+                  <Text fontFamily="mono" fontSize="sm" truncate>
+                    {t.branch?.name ?? t.session?.branch ?? "?"}
+                  </Text>
+                </Box>
+              ))}
+            </Stack>
+          </Box>
+        </Portal>
+      )}
 
       {ctxMenu && (
         <Portal>
