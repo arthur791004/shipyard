@@ -40,7 +40,7 @@ import {
   sandboxLogs,
 } from "./sandbox.js";
 import { createSession, ensureSession, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
-import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, taskFilePath, TaskEntry } from "./tasks.js";
+import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, injectTrunkClaudeMd, taskFilePath, TaskEntry } from "./tasks.js";
 
 function slugify(input: string): string {
   return (
@@ -158,6 +158,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       previewUrl: previewUrl?.trim() || undefined,
       createdAt: Date.now(),
     };
+    // Inject read-only instructions into trunk's CLAUDE.md
+    await injectTrunkClaudeMd(repoPath).catch(() => {});
+
     // Create the single sandbox for this repo (v2: one sandbox per repo)
     const sbName = repoSandboxName(repo);
     repo.sandboxName = sbName;
