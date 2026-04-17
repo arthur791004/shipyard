@@ -30,15 +30,15 @@ import {
 import { createWorktree, deleteBranch as deleteGitBranch, detectDefaultBranch, listGitBranches, removeWorktree } from "./worktree.js";
 import { run, runOrThrow } from "./shell.js";
 import {
-  createSandbox,
+  ensureRepoSandbox,
+  repoSandboxName,
   getSandboxStatus,
-  removeSandbox,
-  restartSandboxClaude,
+  removeRepoSandbox,
+  restartBranchSession,
+  startBranchSession,
+  stopBranchSession,
   sandboxLogs,
-  sandboxName,
-  startSandbox,
-  stopSandbox,
-} from "./docker.js";
+} from "./sandbox.js";
 import { createSession, ensureSession, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
 import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, taskFilePath, TaskEntry } from "./tasks.js";
 
@@ -158,31 +158,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       previewUrl: previewUrl?.trim() || undefined,
       createdAt: Date.now(),
     };
+    // Create the single sandbox for this repo (v2: one sandbox per repo)
+    const sbName = repoSandboxName(repo);
+    repo.sandboxName = sbName;
     await addRepo(repo, true);
 
-    const trunk = getBranch(trunkBranchId(repo.id));
+    // Return immediately. Sandbox creation + yarn install + dashboard
+    // start all run in the background.
+    (async () => {
+      try {
+        await ensureRepoSandbox(repo);
+        await updateRepo(repo.id, { sandboxName: sbName });
+        console.log(`[${name}] repo sandbox ${sbName} ready`);
+      } catch (err) {
+        console.error(`[${name}] sandbox creation failed:`, err);
+      }
 
-    // Return immediately so the UI is responsive. Install + dashboard
-    // start runs in the background — visible in the Logs tab.
-    if (trunk) {
-      (async () => {
-        const install = dashboardInstallCmd?.trim() || DEFAULT_DASHBOARD_INSTALL_CMD;
-        try {
-          console.log(`[${name}] running ${install} on host...`);
-          await runOrThrow("/bin/sh", ["-lc", install], { cwd: repoPath });
-          console.log(`[${name}] install done, starting dashboard`);
-        } catch (err) {
-          console.error(`[${name}] install failed:`, err);
-        }
+      // Install deps on the host (fast, cached)
+      const install = dashboardInstallCmd?.trim() || DEFAULT_DASHBOARD_INSTALL_CMD;
+      try {
+        console.log(`[${name}] running ${install} on host...`);
+        await runOrThrow("/bin/sh", ["-lc", install], { cwd: repoPath });
+      } catch (err) {
+        console.error(`[${name}] install failed:`, err);
+      }
+
+      // Start trunk dashboard on the host
+      const trunk = getBranch(trunkBranchId(repo.id));
+      if (trunk) {
         try {
           await ensureDashboardRunning(trunk.worktreePath, trunk.port);
           await updateBranch(trunk.id, { status: "running" });
-          console.log(`[${name}] trunk dashboard running on :${trunk.port}`);
         } catch (err) {
           console.error(`[${name}] dashboard failed:`, err);
         }
-      })();
-    }
+      }
+    })();
 
     return { repo, activeRepoId: repo.id };
   });
@@ -217,11 +228,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const repo = getRepo(req.params.id);
     if (!repo) return reply.code(404).send({ error: "repo not found" });
 
+    // v2: remove the single repo sandbox (kills all branch sessions)
+    if (repo.sandboxName) {
+      await removeRepoSandbox(repo.sandboxName).catch(() => {});
+    }
     for (const branch of Object.values(listBranchesForRepo(repo.id))) {
-      if (branch.sandboxName) {
-        await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-        await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-      }
       if (branch.worktreePath && !isTrunk(branch)) {
         await removeWorktree(branch.worktreePath).catch(() => {});
       }
@@ -357,18 +368,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await injectTaskIntoClaudeMd(worktreePath, folderSlug);
       }
 
-      const sbName = sandboxName(folderSlug);
-      await createSandbox(sbName, worktreePath);
-      // Start sandbox immediately — Claude can begin working while
-      // yarn install runs in the background.
-      await startSandbox(sbName, worktreePath, port, taskEntry ? buildSeedPrompt() : undefined);
-      await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
+      // v2: use the repo's single sandbox (no per-branch sandbox)
+      const repo = getActiveRepo()!;
+      const sbName = repo.sandboxName || repoSandboxName(repo);
+      await ensureRepoSandbox(repo);
+      await startBranchSession(id, sbName, worktreePath, port, taskEntry ? buildSeedPrompt() : undefined);
+      await updateBranch(id, { worktreePath, status: "running" });
 
-      // Run install on the host in the background (fast: uses yarn
-      // cache from trunk). Claude doesn't need node_modules to start
-      // working — the dev server starts when install completes.
-      const activeRepo = getActiveRepo();
-      const installCmd = activeRepo?.dashboardInstallCmd || DEFAULT_DASHBOARD_INSTALL_CMD;
+      // Install deps on the host in the background
+      const installCmd = repo.dashboardInstallCmd || DEFAULT_DASHBOARD_INSTALL_CMD;
       run("/bin/sh", ["-lc", installCmd], { cwd: worktreePath }).catch((err) =>
         console.error(`[${branchName}] install failed:`, err)
       );
@@ -578,10 +586,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const folderSlug = slugify(gitName) || id;
       try {
         const worktreePath = await createWorktree(folderSlug, gitName);
-        const sbName = sandboxName(folderSlug);
-        await createSandbox(sbName, worktreePath);
-        await startSandbox(sbName, worktreePath, port);
-        await updateBranch(id, { worktreePath, sandboxName: sbName, status: "running" });
+        const sbName = activeRepo.sandboxName || repoSandboxName(activeRepo);
+        await ensureRepoSandbox(activeRepo);
+        await startBranchSession(id, sbName, worktreePath, port);
+        await updateBranch(id, { worktreePath, status: "running" });
         await ensureSession(activeRepo.name, gitName);
       } catch (err: any) {
         await removeBranch(id).catch(() => {});
@@ -608,17 +616,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    if (!branch.sandboxName) return reply.code(400).send({ error: "no sandbox" });
+    const repo = getRepo(branch.repoId);
+    if (!repo?.sandboxName) return reply.code(400).send({ error: "no sandbox for repo" });
 
     if (branch.status === "running") {
-      await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
+      await stopBranchSession(branch.id);
       await updateBranch(branch.id, { status: "stopped" });
       return getBranch(branch.id);
     }
 
     await updateBranch(branch.id, { status: "starting" });
     try {
-      await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
+      await ensureRepoSandbox(repo);
+      await startBranchSession(branch.id, repo.sandboxName, branch.worktreePath, branch.port);
       await updateBranch(branch.id, { status: "running", error: undefined });
       return getBranch(branch.id);
     } catch (err: any) {
@@ -647,52 +657,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string }; Querystring: { hard?: string } }>("/api/branches/:id/refresh", async (req, reply) => {
     const branch = getBranch(req.params.id);
     if (!branch) return reply.code(404).send({ error: "not found" });
-    if (!branch.sandboxName) return reply.code(400).send({ error: "no sandbox" });
+    const repo = getRepo(branch.repoId);
+    if (!repo?.sandboxName) return reply.code(400).send({ error: "no sandbox for repo" });
     const hard = req.query.hard === "1";
 
-    const slug = branch.sandboxName.replace(/^claude-/, "");
+    const folderSlug = slugify(branch.name) || branch.id;
     let seed: string | undefined;
     try {
       const fs = await import("node:fs/promises");
-      await fs.access(taskFilePath(slug));
+      await fs.access(taskFilePath(folderSlug));
       seed = buildSeedPrompt();
     } catch {}
 
     await updateBranch(branch.id, { status: "restarting" });
     try {
       if (hard) {
-        // Hard restart: nuke the entire sandbox and rebuild from scratch.
-        // Fixes stale permissions, broken VM state, corrupted config.
-        await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-        await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-        if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
-        await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
-      } else {
-        const vmStatus = await getSandboxStatus(branch.sandboxName);
-        if (vmStatus === "running") {
-          try {
-            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed, branch.port);
-          } catch {
-            console.warn(`restart(${branch.sandboxName}): exec failed, rebuilding sandbox`);
-            await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-            if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
-            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
-          }
-        } else {
-          try {
-            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
-          } catch {
-            console.warn(`restart(${branch.sandboxName}): start failed, rebuilding sandbox`);
-            await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-            if (branch.worktreePath) await createSandbox(branch.sandboxName, branch.worktreePath);
-            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port, seed);
-          }
-        }
+        // Hard restart: rebuild the repo sandbox from scratch
+        await removeRepoSandbox(repo.sandboxName);
+        await ensureRepoSandbox(repo);
       }
+      await restartBranchSession(branch.id, repo.sandboxName, branch.worktreePath, branch.port, seed);
       await updateBranch(branch.id, { status: "running", error: undefined });
       return { ok: true };
     } catch (err: any) {
-      console.error(`restart(${branch.sandboxName}) failed:`, err);
+      console.error(`restart(${branch.id}) failed:`, err);
       await updateBranch(branch.id, { status: "error", error: err.message }).catch(() => {});
       return reply.code(500).send({ error: `restart failed: ${err.message}` });
     }
@@ -820,10 +808,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const branch = getBranch(req.params.id);
     if (!branch) return reply.code(404).send({ error: "not found" });
     if (isTrunk(branch)) return reply.code(400).send({ error: "trunk cannot be deleted" });
-    if (branch.sandboxName) {
-      await stopSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-      await removeSandbox(branch.sandboxName, branch.worktreePath).catch(() => {});
-    }
+    // v2: just kill the branch session, don't touch the repo sandbox
+    await stopBranchSession(branch.id).catch(() => {});
     if (branch.worktreePath) await removeWorktree(branch.worktreePath).catch(() => {});
     if (branch.name) await deleteGitBranch(branch.name).catch(() => {});
     // Mark the session as completed so the same issue/linear URL can be

@@ -19,14 +19,13 @@ import { ensureSession } from "./sessions.js";
 import { registerRoutes } from "./routes.js";
 import { registerTerminal } from "./terminal.js";
 import {
-  getSandboxStatus,
+  ensureRepoSandbox,
   reconcileSandboxState,
-  restartSandboxClaude,
-  runningSandboxNames,
-  sandboxLastActivity,
-  startSandbox,
-  stopSandbox,
-} from "./docker.js";
+  runningBranchIds,
+  sessionLastActivity,
+  startBranchSession,
+  stopBranchSession,
+} from "./sandbox.js";
 import { ensureDashboardRunning } from "./dashboard.js";
 import { buildSeedPrompt, taskFilePath } from "./tasks.js";
 
@@ -134,43 +133,46 @@ async function main() {
 
   startIdleSandboxSweeper(app.log);
 
-  // Rehydrate sandboxes in the background AFTER the server is listening,
-  // so the API is responsive immediately and the frontend doesn't get
-  // ECONNREFUSED while sandboxes boot (which can take 5-10s each).
+  // v2: Rehydrate in background. Ensure repo sandboxes exist, then
+  // restart branch sessions for branches that were running.
   (async () => {
+    // First pass: ensure each repo's sandbox is up
+    const seenRepos = new Set<string>();
+    for (const branch of listAllBranches()) {
+      const repo = getRepo(branch.repoId);
+      if (!repo || seenRepos.has(repo.id)) continue;
+      seenRepos.add(repo.id);
+      if (repo.sandboxName) {
+        try {
+          await ensureRepoSandbox(repo);
+          app.log.info(`repo sandbox ${repo.sandboxName} ready`);
+        } catch (err) {
+          app.log.error({ err }, `failed to ensure repo sandbox ${repo.sandboxName}`);
+        }
+      }
+    }
+
+    // Second pass: restart branch sessions
     for (const branch of listAllBranches()) {
       if (isTrunk(branch)) continue;
       const repo = getRepo(branch.repoId);
       if (repo) await ensureSession(repo.name, branch.name).catch(() => {});
-      if (branch.status !== "running") continue;
-      if (branch.sandboxName) {
-        try {
-          // Check if there's a task file for this branch — if so, send
-          // the seed prompt so Claude picks up the task on restart.
-          const slug = branch.sandboxName?.replace(/^claude-/, "") ?? "";
-          const fs = await import("node:fs/promises");
-          let seed: string | undefined;
-          try {
-            await fs.access(taskFilePath(slug));
-            seed = buildSeedPrompt();
-          } catch {}
+      if (branch.status !== "running" || !repo?.sandboxName) continue;
 
-          const vmStatus = await getSandboxStatus(branch.sandboxName);
-          if (vmStatus === "running") {
-            await restartSandboxClaude(branch.sandboxName, branch.worktreePath, seed, branch.port);
-            app.log.info(`rehydrated sandbox ${branch.sandboxName} (exec)`);
-          } else if (vmStatus === "stopped") {
-            // VM exists but is stopped — start it normally.
-            await startSandbox(branch.sandboxName, branch.worktreePath, branch.port);
-            app.log.info(`rehydrated sandbox ${branch.sandboxName} (start)`);
-          } else {
-            // VM is missing entirely — mark as stopped.
-            await updateBranch(branch.id, { status: "stopped" });
-            app.log.info(`sandbox ${branch.sandboxName} missing, marked stopped`);
-          }
-        } catch (err) {
-          app.log.error({ err }, `failed to rehydrate sandbox ${branch.sandboxName}`);
-        }
+      try {
+        const folderSlug = branch.worktreePath.split("/").pop() || branch.id;
+        const fs = await import("node:fs/promises");
+        let seed: string | undefined;
+        try {
+          await fs.access(taskFilePath(folderSlug));
+          seed = buildSeedPrompt();
+        } catch {}
+
+        await startBranchSession(branch.id, repo.sandboxName, branch.worktreePath, branch.port, seed);
+        app.log.info(`rehydrated branch session ${branch.name}`);
+      } catch (err) {
+        app.log.error({ err }, `failed to rehydrate branch ${branch.name}`);
+        await updateBranch(branch.id, { status: "stopped" }).catch(() => {});
       }
     }
   })();
@@ -192,17 +194,18 @@ function startIdleSandboxSweeper(log: { info: (msg: string) => void; error: (obj
   const interval = setInterval(async () => {
     const now = Date.now();
 
-    for (const name of runningSandboxNames()) {
-      const last = sandboxLastActivity(name);
+    // v2: check branch sessions (keyed by branchId)
+    for (const branchId of runningBranchIds()) {
+      const last = sessionLastActivity(branchId);
       if (last == null || now - last < idleMs) continue;
-      const branch = listAllBranches().find((b) => b.sandboxName === name);
+      const branch = listAllBranches().find((b) => b.id === branchId);
       if (!branch || isTrunk(branch)) continue;
-      log.info(`[${name}] idle >${Math.round(idleMs / 60000)}m, auto-stopping`);
+      log.info(`[${branch.name}] idle >${Math.round(idleMs / 60000)}m, auto-stopping`);
       try {
-        await stopSandbox(name, branch.worktreePath);
+        await stopBranchSession(branchId);
         await updateBranch(branch.id, { status: "stopped" });
       } catch (err) {
-        log.error({ err }, `idle auto-stop(${name}) failed`);
+        log.error({ err }, `idle auto-stop(${branch.name}) failed`);
       }
     }
 

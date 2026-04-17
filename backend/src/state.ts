@@ -11,6 +11,7 @@ export interface Branch {
   repoId: string;
   isTrunk?: boolean;
   worktreePath: string;
+  /** @deprecated — sandbox is now per-repo, not per-branch. Kept for migration. */
   sandboxName?: string;
   port: number;
   status: BranchStatus;
@@ -28,6 +29,8 @@ export interface Repo {
   dashboardInstallCmd?: string;
   dashboardStartCmd?: string;
   previewUrl?: string;
+  /** Docker sandbox name for this repo (one sandbox per repo). */
+  sandboxName?: string;
   createdAt: number;
 }
 

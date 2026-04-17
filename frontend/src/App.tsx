@@ -851,7 +851,7 @@ export function App() {
             </Button>
 
             {/* Reload group */}
-            {!ctxMenu.branch.isTrunk && ctxMenu.branch.sandboxName && (
+            {!ctxMenu.branch.isTrunk && (
               <>
                 <Box borderTopWidth={1} borderColor="gray.800" my={1} />
                 <Button

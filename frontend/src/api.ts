@@ -22,6 +22,7 @@ export interface Repo {
   dashboardInstallCmd?: string;
   dashboardStartCmd?: string;
   previewUrl?: string;
+  sandboxName?: string;
   createdAt: number;
 }
 

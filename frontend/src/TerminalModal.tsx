@@ -207,7 +207,7 @@ export function TerminalModal({
           <Box
             position="relative"
             onContextMenu={(e) => {
-              if (!branch.sandboxName) return;
+              if (branch.isTrunk) return;
               e.preventDefault();
               setReloadMenu({ x: e.clientX, y: e.clientY });
             }}
@@ -215,7 +215,7 @@ export function TerminalModal({
             <IconButton
               label="Reload"
               onClick={(_e) => onRefresh(branch)}
-              disabled={!branch.sandboxName || branch.isTrunk}
+              disabled={branch.isTrunk}
             >
               <RefreshIcon />
             </IconButton>
@@ -269,7 +269,7 @@ export function TerminalModal({
           >
             <PreviewIcon />
           </IconButton>
-          {!branch.isTrunk && branch.sandboxName && (
+          {!branch.isTrunk && (
             <IconButton
               label="Push & create PR"
               onClick={(_e) => onPush(branch)}
