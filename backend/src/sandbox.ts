@@ -610,7 +610,19 @@ function scheduleSeedPrompt(entry: SessionPty, id: string, prompt: string): void
     clearTimeout(hardTimer);
     entry.subscribers.delete(listener);
     try {
-      entry.term.write(prompt + "\r");
+      // Wrap the seed in bracketed-paste markers so Claude's TUI treats
+      // it as a single complete input, then send CR to submit. A bare \r
+      // after plain-typed text doesn't submit in claude 2.1 — the input
+      // box still thinks the user is editing. The frontend chat input
+      // uses the same trick (TerminalModal.tsx).
+      entry.term.write(`\x1b[200~${prompt}\x1b[201~`);
+      // Short delay so the TUI has a tick to process the paste close
+      // marker before it sees the Enter key.
+      setTimeout(() => {
+        try { entry.term.write("\r"); } catch (err) {
+          console.error(`seed prompt submit(${id}) failed:`, err);
+        }
+      }, 100);
     } catch (err) {
       console.error(`seed prompt write(${id}) failed:`, err);
     }
@@ -619,7 +631,10 @@ function scheduleSeedPrompt(entry: SessionPty, id: string, prompt: string): void
   const listener = () => {
     if (sent) return;
     if (quiesceTimer) clearTimeout(quiesceTimer);
-    quiesceTimer = setTimeout(send, 1500);
+    // Wait a little longer than the old 1.5s — claude 2.1's startup
+    // (CLAUDE.md ingest + tool registration) can emit intermittent
+    // output for a couple of seconds before the input box settles.
+    quiesceTimer = setTimeout(send, 2500);
   };
 
   entry.subscribers.add(listener);
