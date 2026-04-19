@@ -284,6 +284,7 @@ export function App() {
                   branch={liveBranch}
                   kind={terminalPanel.kind}
                   isMobile={isMobile}
+                  previewPending={pending[liveBranch.id] === "preview"}
                   onKindChange={(kind) =>
                     setTerminalPanel((prev) => (prev ? { ...prev, kind } : prev))
                   }

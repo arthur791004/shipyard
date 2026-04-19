@@ -11,6 +11,7 @@ interface Props {
   branch: Branch;
   kind: TerminalKind;
   isMobile?: boolean;
+  previewPending?: boolean;
   onKindChange: (kind: TerminalKind) => void;
   onClose: () => void;
   onPreview: (b: Branch) => void;
@@ -27,6 +28,7 @@ export function TerminalModal({
   branch,
   kind,
   isMobile,
+  previewPending,
   onKindChange,
   onClose,
   onPreview,
@@ -300,9 +302,10 @@ export function TerminalModal({
             }}
           >
             <IconButton
-              label="Preview"
+              label={previewPending ? "Preview starting…" : "Preview"}
               onClick={(_e) => onPreview(branch)}
               disabled={branch.status !== "running"}
+              loading={previewPending}
             >
               <PreviewIcon />
             </IconButton>
@@ -404,11 +407,13 @@ function IconButton({
   label,
   onClick,
   disabled,
+  loading,
   children,
 }: {
   label: string;
   onClick: (e: React.MouseEvent) => void;
   disabled?: boolean;
+  loading?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -420,7 +425,8 @@ function IconButton({
           px={2}
           aria-label={label}
           onClick={onClick}
-          disabled={disabled}
+          disabled={disabled || loading}
+          loading={loading}
         >
           {children}
         </Button>
