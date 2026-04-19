@@ -134,7 +134,7 @@ export function Welcome({ onDone }: Props) {
                 <Code>/linear &lt;url&gt;</Code> — Claude implements a Linear ticket.
               </BulletRow>
               <BulletRow>
-                <Code>/branch &lt;name&gt;</Code> — a blank workspace for anything else.
+                <Code>/branch &lt;name&gt;</Code> — open any branch for a blank chat. New for a fresh task, existing to continue or test.
               </BulletRow>
             </Stack>
             <Flex justify="flex-end" mt="auto">

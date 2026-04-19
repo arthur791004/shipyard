@@ -6,7 +6,7 @@ import { SendIcon } from "./Icons";
 import { toaster } from "./Toaster";
 
 const COMMAND_MENU: { usage: string; prefix: string; desc: string }[] = [
-  { usage: "/branch <name> [base]", prefix: "/branch ", desc: "start a blank sandbox" },
+  { usage: "/branch <name> [base]", prefix: "/branch ", desc: "open any branch — new for a task, or existing to continue/test" },
   { usage: "/gh-issue <url>", prefix: "/gh-issue ", desc: "Claude implements a GitHub issue" },
   { usage: "/linear <url>", prefix: "/linear ", desc: "Claude implements a Linear issue" },
 ];
