@@ -40,12 +40,19 @@ export async function appendTaskEntry(slug: string, entry: TaskFileEntry): Promi
 // Seed prompt written into the claude PTY at session start. Points Claude
 // at the task history file directly — we deliberately don't inject anything
 // into the worktree's CLAUDE.md so the checkout stays pristine (no phantom
-// diff against the repo). Sandbox rules live in the sandbox user's global
-// ~/.claude/CLAUDE.md (see syncSandboxConfig in sandbox.ts).
+// diff against the repo). Sandbox rules (including the commit/push CLI)
+// live in the sandbox user's global ~/.claude/CLAUDE.md (see
+// syncSandboxConfig in sandbox.ts), so the seed just points at the task
+// and names the ship-it steps at the end.
 export function buildSeedPrompt(taskFile: string): string {
   return [
-    `Read your task history at \`${taskFile}\`, then start working on the most recent task entry.`,
+    `Read your task history at \`${taskFile}\` and start working on the most recent task entry.`,
     "The file is appended over time — re-read it whenever you need more context.",
+    "When the implementation is done and tested, ship it:",
+    "1. `shipyard:sandbox commit -m \"<message>\"` to commit your changes.",
+    "2. Draft a PR body from `.github/pull_request_template.md` (if present) and pipe it in:",
+    "   `printf '%s' \"$pr_body\" | shipyard:sandbox push --title \"<title>\"`.",
+    "Report the PR URL back when push succeeds.",
   ].join(" ");
 }
 

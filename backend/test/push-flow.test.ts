@@ -520,10 +520,13 @@ describe("shipyard:sandbox commit CLI", () => {
 // -------- Layer 3: seed prompt + worktree hygiene --------
 
 describe("buildSeedPrompt", () => {
-  it("points Claude at the per-branch task history file", () => {
+  it("points Claude at the per-branch task history file and the ship-it commands", () => {
     const seed = buildSeedPrompt(taskFilePath("demo-slug"));
     expect(seed).toContain(taskFilePath("demo-slug"));
     expect(seed).toMatch(/most recent task entry/);
+    // Also names the ship-it steps so Claude knows to commit + push when done.
+    expect(seed).toMatch(/shipyard:sandbox commit/);
+    expect(seed).toMatch(/shipyard:sandbox push/);
   });
 });
 
