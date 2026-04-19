@@ -393,55 +393,10 @@ export function TerminalModal({
           </Text>
         </Flex>
       )}
-      <Box
-        flex="1"
-        p={4}
-        overflow="hidden"
-        ref={containerRef}
-        css={{
-          ".xterm": { height: "100%" },
-          // Overlay-style scrollbar: invisible at rest, fades in when the
-          // user hovers the terminal. Fully rounded pill shape (border-
-          // radius: 999px clamps to half the thumb width for perfect
-          // rounding on both ends). Matches how native macOS scrollbars
-          // and most chat/code editors behave.
-          ".xterm .xterm-viewport": {
-            // Firefox: no :hover selector on scrollbar parts, so we
-            // transition scrollbar-color on the viewport's :hover state.
-            scrollbarWidth: "thin",
-            scrollbarColor: "transparent transparent",
-            transition: "scrollbar-color 200ms ease",
-          },
-          ".xterm:hover .xterm-viewport, .xterm .xterm-viewport:hover": {
-            scrollbarColor: "rgba(255,255,255,0.25) transparent",
-          },
-          ".xterm .xterm-viewport::-webkit-scrollbar": {
-            width: "10px",
-            height: "10px",
-          },
-          ".xterm .xterm-viewport::-webkit-scrollbar-track": {
-            background: "transparent",
-          },
-          ".xterm .xterm-viewport::-webkit-scrollbar-thumb": {
-            background: "transparent",
-            borderRadius: "999px",
-            border: "2px solid transparent",
-            backgroundClip: "padding-box",
-            transition: "background 200ms ease",
-          },
-          ".xterm:hover .xterm-viewport::-webkit-scrollbar-thumb, .xterm .xterm-viewport:hover::-webkit-scrollbar-thumb": {
-            background: "rgba(255,255,255,0.22)",
-            backgroundClip: "padding-box",
-          },
-          ".xterm .xterm-viewport::-webkit-scrollbar-thumb:hover": {
-            background: "rgba(255,255,255,0.38) !important",
-            backgroundClip: "padding-box",
-          },
-          ".xterm .xterm-viewport::-webkit-scrollbar-corner": {
-            background: "transparent",
-          },
-        }}
-      />
+      {/* Scrollbar overrides live in styles.css — Emotion mangles
+          ::-webkit-scrollbar-* rules in its object syntax, so plain CSS
+          is the only reliable way to target them. */}
+      <Box flex="1" p={4} overflow="hidden" ref={containerRef} css={{ ".xterm": { height: "100%" } }} />
     </Flex>
   );
 }
