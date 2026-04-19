@@ -40,7 +40,7 @@ import {
   sandboxLogs,
 } from "./sandbox.js";
 import { createSession, ensureSession, findSessionByBranch, listSessions, updateSession } from "./sessions.js";
-import { appendTaskEntry, buildSeedPrompt, injectTaskIntoClaudeMd, injectTrunkClaudeMd, taskFilePath, TaskEntry } from "./tasks.js";
+import { appendTaskEntry, buildSeedPrompt, injectTrunkClaudeMd, taskFilePath, TaskEntry } from "./tasks.js";
 
 function slugify(input: string): string {
   return (
@@ -370,17 +370,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     try {
       const worktreePath = await createWorktree(folderSlug, branchName, base);
 
-      // Inject task instructions into the worktree's CLAUDE.md so Claude
-      // reads them automatically on startup — no PTY timing dependency.
-      if (taskEntry) {
-        await injectTaskIntoClaudeMd(worktreePath, folderSlug);
-      }
-
-      // v2: use the repo's single sandbox (no per-branch sandbox)
+      // v2: use the repo's single sandbox (no per-branch sandbox).
+      // Sandbox rules live in the agent user's ~/.claude/CLAUDE.md (written
+      // by ensureRepoSandbox → syncSandboxConfig), so we don't touch the
+      // worktree's CLAUDE.md at all. Per-branch task context rides on the
+      // seed prompt pointing at the task history file.
       const repo = getActiveRepo()!;
       const sbName = repo.sandboxName || repoSandboxName(repo);
       await ensureRepoSandbox(repo);
-      await startBranchSession(id, sbName, worktreePath, port, taskEntry ? buildSeedPrompt() : undefined);
+      const seed = taskEntry ? buildSeedPrompt(taskFilePath(folderSlug)) : undefined;
+      await startBranchSession(id, sbName, worktreePath, port, seed);
       await updateBranch(id, { worktreePath, status: "running" });
 
       // Note: yarn install is NOT run for branch worktrees — they share
@@ -680,7 +679,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     try {
       const fs = await import("node:fs/promises");
       await fs.access(taskFilePath(folderSlug));
-      seed = buildSeedPrompt();
+      seed = buildSeedPrompt(taskFilePath(folderSlug));
     } catch {}
 
     await updateBranch(branch.id, { status: "restarting" });

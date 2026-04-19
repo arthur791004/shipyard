@@ -24,7 +24,6 @@ import pty, { IPty } from "node-pty";
 import { run, runOrThrow } from "./shell.js";
 import { config } from "./config.js";
 import { listAllBranches, updateBranch, Repo } from "./state.js";
-import { syncSandboxConfig } from "./tasks.js";
 
 // ---------------------------------------------------------------------------
 // Docker path resolution (reused from docker.ts)
@@ -129,22 +128,57 @@ async function ensureSandboxProxyAllowsBackend(sandboxName: string): Promise<voi
   ]);
 }
 
-async function installShipyardCli(sandboxName: string): Promise<void> {
-  const cli = await fsp.readFile(SHIPYARD_CLI_SRC, "utf8");
+// Small helper: stream `content` into a file inside the sandbox via
+// `docker sandbox exec -i ... cat > <path>`, then chmod +x if requested.
+async function writeFileIntoSandbox(
+  sandboxName: string,
+  destPath: string,
+  content: string,
+  opts: { executable?: boolean } = {},
+): Promise<void> {
+  const chmod = opts.executable ? ` && chmod +x '${destPath}'` : "";
   await new Promise<void>((resolve, reject) => {
     const child = spawn(resolveDockerPath(), [
       "sandbox", "exec", "-i", sandboxName, "sh", "-c",
-      `mkdir -p "$(dirname '${SHIPYARD_CLI_DEST}')" && cat > '${SHIPYARD_CLI_DEST}' && chmod +x '${SHIPYARD_CLI_DEST}'`,
+      `mkdir -p "$(dirname '${destPath}')" && cat > '${destPath}'${chmod}`,
     ], { stdio: ["pipe", "pipe", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
     child.on("error", reject);
     child.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`installShipyardCli exit ${code}: ${stderr}`))
+      code === 0 ? resolve() : reject(new Error(`write ${destPath} exit ${code}: ${stderr}`))
     );
-    child.stdin.write(cli);
+    child.stdin.write(content);
     child.stdin.end();
   });
+}
+
+async function installShipyardCli(sandboxName: string): Promise<void> {
+  const cli = await fsp.readFile(SHIPYARD_CLI_SRC, "utf8");
+  await writeFileIntoSandbox(sandboxName, SHIPYARD_CLI_DEST, cli, { executable: true });
+}
+
+// Static rules written to the sandbox user's global CLAUDE.md. Claude Code
+// reads ~/.claude/CLAUDE.md as user-level memory for every session, so the
+// rules apply to every branch's claude without touching the worktree's own
+// CLAUDE.md (which would otherwise show as a diff against the repo).
+const SANDBOX_CLAUDE_MD = [
+  "# Shipyard sandbox rules",
+  "",
+  "`git commit` corrupts the bind-mounted index in this sandbox (host and sandbox git disagree on the format) and `git push` has no remote auth. Route both through the host via the `shipyard:sandbox` CLI:",
+  "",
+  "- **Commit**: `shipyard:sandbox commit -m \"msg\"` stages everything and commits. Add `--amend` (with or without `-m`) to fix the previous commit.",
+  "- **Push**: `shipyard:sandbox push` pushes the current branch to origin.",
+  "- **Open a PR**: also `shipyard:sandbox push` — runs `gh pr create --fill` on the first push, or returns the existing PR URL on subsequent pushes.",
+  "- Do NOT run `git commit`, `git push`, or `gh pr create` directly.",
+  "- Other git subcommands (`status`, `add`, `diff`, `log`, `branch`, ...) work normally.",
+  "- You CAN run `yarn install` and start the dev server if you need to test changes.",
+  "- The host forwards your sandbox port to the browser automatically.",
+  "",
+].join("\n");
+
+async function syncSandboxConfig(sandboxName: string): Promise<void> {
+  await writeFileIntoSandbox(sandboxName, "/home/agent/.claude/CLAUDE.md", SANDBOX_CLAUDE_MD);
 }
 
 // ---------------------------------------------------------------------------
@@ -343,13 +377,16 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
   const status = await getSandboxStatus(name);
   if (status === "running") {
     // Already running — re-apply per-sandbox config that might be missing
-    // (e.g. sandbox was created before shipyard:sandbox existed). Both
+    // (e.g. sandbox was created before shipyard:sandbox existed). All
     // calls are idempotent.
     try { await ensureSandboxProxyAllowsBackend(name); } catch (err) {
       console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
     }
     try { await installShipyardCli(name); } catch (err) {
       console.warn(`installShipyardCli(${name}) failed:`, err);
+    }
+    try { await syncSandboxConfig(name); } catch (err) {
+      console.warn(`syncSandboxConfig(${name}) failed:`, err);
     }
     return name;
   }
@@ -427,6 +464,12 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
     console.warn(`installShipyardCli(${name}) failed:`, err);
   }
 
+  // Write sandbox rules to the agent user's global ~/.claude/CLAUDE.md so
+  // Claude Code picks them up without us touching the worktree.
+  try { await syncSandboxConfig(name); } catch (err) {
+    console.warn(`syncSandboxConfig(${name}) failed:`, err);
+  }
+
   return name;
 }
 
@@ -460,13 +503,6 @@ export async function startBranchSession(
   seedPrompt?: string
 ): Promise<void> {
   if (sessions.has(branchId)) return;
-
-  // Keep the branch's CLAUDE.md in sync with the latest sandbox rules
-  // (covers pre-existing branches whose CLAUDE.md was last written before
-  // the shipyard:sandbox CLI existed). Non-fatal — claude still starts.
-  try { await syncSandboxConfig(worktreePath); } catch (err) {
-    console.warn(`syncSandboxConfig(${worktreePath}) failed:`, err);
-  }
 
   // Sync config for this worktree path
   try { await syncClaudeConfigIn(sandboxName, worktreePath); } catch {}

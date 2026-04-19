@@ -170,7 +170,7 @@ async function main() {
         let seed: string | undefined;
         try {
           await fs.access(taskFilePath(folderSlug));
-          seed = buildSeedPrompt();
+          seed = buildSeedPrompt(taskFilePath(folderSlug));
         } catch {}
 
         await startBranchSession(branch.id, repo.sandboxName, branch.worktreePath, branch.port, seed);
