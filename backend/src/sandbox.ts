@@ -557,11 +557,26 @@ export async function startBranchSession(
   // assignments before `exec` set them only for the claude process +
   // its children (shells spawned by Claude's Bash tool inherit them
   // via execve).
-  const shellCmd =
+  //
+  // When we have a seed prompt, pass it as claude's positional prompt
+  // arg (`claude [prompt]` starts an interactive session with the
+  // prompt already submitted). That's much more robust than typing
+  // into the PTY after the TUI comes up — the old bracketed-paste
+  // injection was fragile across claude versions and had timing races
+  // with the input box.
+  const envPrefix =
     `SHIPYARD_BRANCH_ID=${branchId} ` +
-    `SHIPYARD_BACKEND_URL=http://host.docker.internal:${config.port} ` +
-    `exec claude --dangerously-skip-permissions`;
+    `SHIPYARD_BACKEND_URL=http://host.docker.internal:${config.port} `;
+  const shellCmd = seedPrompt
+    ? `${envPrefix}exec claude --dangerously-skip-permissions "$1"`
+    : `${envPrefix}exec claude --dangerously-skip-permissions`;
   execArgs.push(sandboxName, "sh", "-lc", shellCmd);
+  if (seedPrompt) {
+    // `sh -c <script> [arg0 arg1 …]` — arg0 becomes $0 (just a label,
+    // "shipyard-seed" here), arg1 becomes $1 (the actual prompt). This
+    // avoids having to shell-escape the prompt string.
+    execArgs.push("shipyard-seed", seedPrompt);
+  }
 
   const term = pty.spawn(dockerPath, execArgs, {
     name: "xterm-256color",
@@ -603,8 +618,6 @@ export async function startBranchSession(
   });
 
   sessions.set(branchId, entry);
-
-  if (seedPrompt) scheduleSeedPrompt(entry, branchId, seedPrompt);
 }
 
 /**
@@ -634,52 +647,6 @@ export async function restartBranchSession(
 ): Promise<void> {
   await stopBranchSession(branchId);
   await startBranchSession(branchId, sandboxName, worktreePath, port, seedPrompt);
-}
-
-// ---------------------------------------------------------------------------
-// Seed prompt (quiescence-based PTY injection)
-// ---------------------------------------------------------------------------
-
-function scheduleSeedPrompt(entry: SessionPty, id: string, prompt: string): void {
-  let quiesceTimer: NodeJS.Timeout | null = null;
-  let sent = false;
-
-  const send = () => {
-    if (sent) return;
-    sent = true;
-    if (quiesceTimer) clearTimeout(quiesceTimer);
-    clearTimeout(hardTimer);
-    entry.subscribers.delete(listener);
-    try {
-      // Wrap the seed in bracketed-paste markers so Claude's TUI treats
-      // it as a single complete input, then send CR to submit. A bare \r
-      // after plain-typed text doesn't submit in claude 2.1 — the input
-      // box still thinks the user is editing. The frontend chat input
-      // uses the same trick (TerminalModal.tsx).
-      entry.term.write(`\x1b[200~${prompt}\x1b[201~`);
-      // Short delay so the TUI has a tick to process the paste close
-      // marker before it sees the Enter key.
-      setTimeout(() => {
-        try { entry.term.write("\r"); } catch (err) {
-          console.error(`seed prompt submit(${id}) failed:`, err);
-        }
-      }, 100);
-    } catch (err) {
-      console.error(`seed prompt write(${id}) failed:`, err);
-    }
-  };
-
-  const listener = () => {
-    if (sent) return;
-    if (quiesceTimer) clearTimeout(quiesceTimer);
-    // Wait a little longer than the old 1.5s — claude 2.1's startup
-    // (CLAUDE.md ingest + tool registration) can emit intermittent
-    // output for a couple of seconds before the input box settles.
-    quiesceTimer = setTimeout(send, 2500);
-  };
-
-  entry.subscribers.add(listener);
-  const hardTimer = setTimeout(send, 30_000);
 }
 
 // ---------------------------------------------------------------------------
