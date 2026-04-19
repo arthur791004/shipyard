@@ -23,7 +23,6 @@ import path from "node:path";
 import pty, { IPty } from "node-pty";
 import { run, runOrThrow } from "./shell.js";
 import { config } from "./config.js";
-import { getRpcDir } from "./rpc.js";
 import { listAllBranches, updateBranch, Repo } from "./state.js";
 
 // ---------------------------------------------------------------------------
@@ -116,6 +115,18 @@ export function repoSandboxName(repo: Repo): string {
 // the script resident even if the mount is torn down.
 const SHIPYARD_CLI_SRC = path.join(config.projectRoot, "backend", "sandbox-bin", "shipyard:sandbox");
 const SHIPYARD_CLI_DEST = "/home/agent/.local/bin/shipyard:sandbox";
+
+// Docker Sandboxes route sandbox-outbound traffic through an HTTP proxy
+// with a default-deny rule on localhost ports (the backend's `host.docker.internal:<port>`
+// resolves to localhost from the proxy's POV and is blocked). This lifts
+// that single rule so the shipyard:sandbox CLI can reach the backend.
+// Idempotent — safe to run every time we ensure the sandbox is up.
+async function ensureSandboxProxyAllowsBackend(sandboxName: string): Promise<void> {
+  await runOrThrow(resolveDockerPath(), [
+    "sandbox", "network", "proxy", sandboxName,
+    "--allow-host", `localhost:${config.port}`,
+  ]);
+}
 
 async function installShipyardCli(sandboxName: string): Promise<void> {
   const cli = await fsp.readFile(SHIPYARD_CLI_SRC, "utf8");
@@ -330,8 +341,12 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
 
   const status = await getSandboxStatus(name);
   if (status === "running") {
-    // Already running — just re-install the CLI in case it's stale or
-    // missing (e.g. sandbox was created before shipyard:sandbox existed).
+    // Already running — re-apply per-sandbox config that might be missing
+    // (e.g. sandbox was created before shipyard:sandbox existed). Both
+    // calls are idempotent.
+    try { await ensureSandboxProxyAllowsBackend(name); } catch (err) {
+      console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
+    }
     try { await installShipyardCli(name); } catch (err) {
       console.warn(`installShipyardCli(${name}) failed:`, err);
     }
@@ -400,6 +415,12 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
   try { await syncCredentialsIn(name); } catch {}
   try { await syncClaudeConfigIn(name); } catch {}
 
+  // Lift the default-deny rule for the backend port so shipyard:sandbox
+  // can reach the host API.
+  try { await ensureSandboxProxyAllowsBackend(name); } catch (err) {
+    console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
+  }
+
   // Install the shipyard:sandbox CLI into /home/agent/.local/bin.
   try { await installShipyardCli(name); } catch (err) {
     console.warn(`installShipyardCli(${name}) failed:`, err);
@@ -444,15 +465,15 @@ export async function startBranchSession(
 
   const dockerPath = resolveDockerPath();
   const execArgs = ["sandbox", "exec", "-it", "-w", worktreePath];
-  // The shipyard:sandbox CLI is installed into /home/agent/.local/bin (already
-  // on PATH via /etc/profile in the claude image). We only need to inject the
-  // branch + RPC-dir context so the CLI knows who it is and where to drop
-  // request files. Env assignments before `exec` set them only for the
-  // claude process + its children (shells spawned by Claude's Bash tool
-  // inherit them via execve).
+  // The shipyard:sandbox CLI is installed into /home/agent/.local/bin
+  // (already on PATH in the claude image). We just need to tell the CLI
+  // which branch it's acting for and how to reach the host API. Env
+  // assignments before `exec` set them only for the claude process +
+  // its children (shells spawned by Claude's Bash tool inherit them
+  // via execve).
   const shellCmd =
     `SHIPYARD_BRANCH_ID=${branchId} ` +
-    `SHIPYARD_RPC_DIR=${getRpcDir()} ` +
+    `SHIPYARD_BACKEND_URL=http://host.docker.internal:${config.port} ` +
     `exec claude --dangerously-skip-permissions`;
   execArgs.push(sandboxName, "sh", "-lc", shellCmd);
 
