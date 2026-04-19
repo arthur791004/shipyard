@@ -12,9 +12,9 @@ const COMMAND_MENU: {
   /** Human-friendly label for the one-click chip row under the input. */
   chip: string;
 }[] = [
-  { usage: "/gh-issue <url>", prefix: "/gh-issue ", desc: "Claude implements a GitHub issue", chip: "Implement a GitHub issue" },
-  { usage: "/linear <url>", prefix: "/linear ", desc: "Claude implements a Linear ticket", chip: "Implement a Linear ticket" },
-  { usage: "/branch <name> [base]", prefix: "/branch ", desc: "open any branch — new for a task, or existing to continue/test", chip: "Open a branch" },
+  { usage: "/gh-issue <url>", prefix: "/gh-issue ", desc: "Claude implements a GitHub issue", chip: "GitHub issue" },
+  { usage: "/linear <url>", prefix: "/linear ", desc: "Claude implements a Linear ticket", chip: "Linear ticket" },
+  { usage: "/branch <name> [base]", prefix: "/branch ", desc: "open any branch — new for a task, or existing to continue/test", chip: "Branch" },
 ];
 
 interface Props {
