@@ -13,6 +13,7 @@ import {
   Stack,
   Text,
 } from "@chakra-ui/react";
+import { ShipyardIcon } from "./Icons";
 import { api, SystemCheck } from "./api";
 import { toaster } from "./Toaster";
 
@@ -111,7 +112,10 @@ export function Welcome({ onDone }: Props) {
         flexDirection="column"
       >
         <Flex justify="space-between" align="center" mb={6}>
-          <Heading size="lg">Shipyard</Heading>
+          <HStack gap={2}>
+            <ShipyardIcon width={32} height={16} />
+            <Heading size="lg">Shipyard</Heading>
+          </HStack>
           <StepDots current={step} />
         </Flex>
         <Box flex={1} display="flex" flexDirection="column">

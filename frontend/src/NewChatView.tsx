@@ -1,7 +1,7 @@
 import { RefObject, useState } from "react";
-import { Box, Button, Flex, Heading, Text } from "@chakra-ui/react";
+import { Box, Button, Flex, HStack, Heading, Text } from "@chakra-ui/react";
 import { Branch, Session } from "./api";
-import { SidebarIcon } from "./Icons";
+import { ShipyardIcon, SidebarIcon } from "./Icons";
 import { SidebarContent } from "./SidebarContent";
 import { CommandInput } from "./CommandInput";
 import { Task } from "./TaskRow";
@@ -102,7 +102,10 @@ export function NewChatView({
             )}
           </Box>
         )}
-        <Heading size="lg" color="gray.300">Shipyard</Heading>
+        <HStack gap={2} color="gray.300">
+          <ShipyardIcon width={32} height={16} />
+          <Heading size="lg">Shipyard</Heading>
+        </HStack>
       </Flex>
       <Flex flex="1" direction="column" align="center" justify="center" px={4} w="100%" maxW="640px" mx="auto">
         <Text fontSize="lg" color="gray.400" mb={6}>
