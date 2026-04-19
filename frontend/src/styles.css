@@ -5,6 +5,18 @@
   animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* ─── Terminal (xterm) content padding ───────────────────────────────────
+   The overlay scrollbar (see below) is transparent at rest, which leaves
+   row text visually hugging the right edge. Add a small right gutter on
+   the content layer itself so there's breathing room between the cells
+   and where the scrollbar appears on hover. Applies to both the DOM
+   renderer's .xterm-rows container and the canvas renderer's
+   .xterm-screen wrapper; whichever one is live gets the padding. */
+.xterm .xterm-rows,
+.xterm .xterm-screen {
+  padding-right: 12px;
+}
+
 /* ─── Terminal (xterm) scrollbar ─────────────────────────────────────────
    xterm 5.x puts overflow-y:scroll on `.xterm-viewport`, so the browser
    paints its native scrollbar there. Override with an overlay-style bar

@@ -393,23 +393,9 @@ export function TerminalModal({
           </Text>
         </Flex>
       )}
-      {/* Scrollbar overrides live in styles.css — Emotion mangles
-          ::-webkit-scrollbar-* rules in its object syntax, so plain CSS
-          is the only reliable way to target them.
-          pr={6} > pl={4} compensates for the now-transparent scrollbar:
-          with the old opaque bar it drew its own visual gutter, but the
-          overlay style leaves text hugging the right edge unless we add
-          breathing room here. */}
-      <Box
-        flex="1"
-        pl={4}
-        pt={4}
-        pb={4}
-        pr={6}
-        overflow="hidden"
-        ref={containerRef}
-        css={{ ".xterm": { height: "100%" } }}
-      />
+      {/* Scrollbar overrides + inner content padding live in styles.css
+          (Emotion mangles ::-webkit-scrollbar-* in object syntax). */}
+      <Box flex="1" p={4} overflow="hidden" ref={containerRef} css={{ ".xterm": { height: "100%" } }} />
     </Flex>
   );
 }
