@@ -64,6 +64,7 @@ export async function createWorktree(folderName: string, branch: string, base?: 
   const localCheck = await run("git", ["-C", repo.repoPath, "rev-parse", "--verify", branch]);
   if (localCheck.code === 0) {
     await worktreeAdd(repo.repoPath, ["worktree", "add", worktreePath, branch], branch);
+    await shareTrunkHuskyHelpers(repo.repoPath, worktreePath);
     return worktreePath;
   }
 
@@ -81,13 +82,37 @@ export async function createWorktree(folderName: string, branch: string, base?: 
       ["worktree", "add", "-B", branch, worktreePath, `origin/${branch}`],
       branch
     );
+    await shareTrunkHuskyHelpers(repo.repoPath, worktreePath);
     return worktreePath;
   }
 
   const args = ["worktree", "add", "-b", branch, worktreePath];
   if (base) args.push(base);
   await worktreeAdd(repo.repoPath, args, branch);
+  await shareTrunkHuskyHelpers(repo.repoPath, worktreePath);
   return worktreePath;
+}
+
+// Husky's `.husky/_/` helper directory (contains husky.sh + shim hooks) is
+// written by `yarn install` and lives only in the trunk checkout — branch
+// worktrees skip `yarn install` to share trunk's node_modules, so their
+// tracked hooks (e.g. `.husky/pre-commit`) fail with "No such file or
+// directory" when they `source .husky/_/husky.sh`. Symlink trunk's copy in
+// so the hooks actually run. Same helper files, same contents across any
+// worktree — sharing via symlink is safe and self-updating.
+async function shareTrunkHuskyHelpers(repoPath: string, worktreePath: string): Promise<void> {
+  const trunkHelpers = path.join(repoPath, ".husky", "_");
+  const worktreeHelpers = path.join(worktreePath, ".husky", "_");
+  if (!(await exists(trunkHelpers))) return; // no husky in this repo
+  if (await exists(worktreeHelpers)) return; // already set up (or a real dir)
+  try {
+    await fs.mkdir(path.dirname(worktreeHelpers), { recursive: true });
+    await fs.symlink(trunkHelpers, worktreeHelpers, "dir");
+  } catch {
+    // Non-fatal — if the symlink can't be created (filesystem quirks,
+    // permissions, whatever), the user will still see the original husky
+    // error and can diagnose from there.
+  }
 }
 
 export async function listGitBranches(): Promise<string[]> {
