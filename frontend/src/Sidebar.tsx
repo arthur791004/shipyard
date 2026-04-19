@@ -105,7 +105,14 @@ export function Sidebar({
         </Button>
       </Flex>
 
-      <Box ref={taskListRef} flex="1" overflowY="auto" px={2} py={2}>
+      <Box
+        ref={taskListRef}
+        flex="1"
+        overflowY="auto"
+        overflowX="hidden"
+        px={2}
+        py={2}
+      >
         {/* + New chat */}
         <Box
           px={3}
