@@ -40,6 +40,7 @@ const { runOrThrow } = await import("../src/shell.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "..", "sandbox-bin", "shipyard:sandbox");
+const GIT_WRAPPER_PATH = path.resolve(__dirname, "..", "sandbox-bin", "git");
 
 const REPO_ID = "test-repo";
 const BRANCH_ID = "test-branch";
@@ -406,6 +407,61 @@ describe("shipyard:sandbox commit CLI", () => {
   });
 });
 
+// -------- Layer 2b: git wrapper --------
+
+function runGitWrapper(
+  args: string[],
+  cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(GIT_WRAPPER_PATH, args, { cwd });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+  });
+}
+
+describe("sandbox-bin/git wrapper", () => {
+  beforeEach(resetCommitWorktree);
+
+  it("blocks `git commit` and points at shipyard:sandbox commit", async () => {
+    const { code, stderr } = await runGitWrapper(["commit", "-m", "nope"], commitWorktree);
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/shipyard:sandbox commit/);
+    expect(stderr).toMatch(/git commit/);
+  });
+
+  it("blocks `git commit --amend` via the same path", async () => {
+    const { code, stderr } = await runGitWrapper(["commit", "--amend", "--no-edit"], commitWorktree);
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/shipyard:sandbox commit --amend/);
+  });
+
+  it("blocks `git -C <path> commit` (subcommand after top-level flag)", async () => {
+    const { code, stderr } = await runGitWrapper(["-C", commitWorktree, "commit", "-m", "nope"], "/tmp");
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/shipyard:sandbox commit/);
+  });
+
+  it("blocks `git push` and points at shipyard:sandbox push", async () => {
+    const { code, stderr } = await runGitWrapper(["push"], commitWorktree);
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/shipyard:sandbox push/);
+  });
+
+  it("passes `git status` through to the real git", async () => {
+    const { code, stderr } = await runGitWrapper(["status", "--porcelain"], commitWorktree);
+    expect(code, `stderr=${stderr}`).toBe(0);
+  });
+
+  it("passes `git log -1` through to the real git", async () => {
+    const { code, stdout, stderr } = await runGitWrapper(["log", "-1", "--format=%s"], commitWorktree);
+    expect(code, `stderr=${stderr}`).toBe(0);
+    expect(stdout.trim()).toBe("initial");
+  });
+});
+
 // -------- Layer 3: CLAUDE.md injection guides Claude to the CLI --------
 
 describe("injectTaskIntoClaudeMd", () => {
@@ -414,11 +470,15 @@ describe("injectTaskIntoClaudeMd", () => {
     try {
       await injectTaskIntoClaudeMd(worktree, "demo-slug");
       const body = await fsp.readFile(path.join(worktree, "CLAUDE.md"), "utf8");
+      // Sandbox rules appear before Current Task so Claude reads them first.
+      expect(body.indexOf("Sandbox rules")).toBeLessThan(body.indexOf("Current Task"));
       // All three actions Claude needs to know are explicitly named.
       expect(body).toMatch(/\*\*Commit\*\*: `shipyard:sandbox commit/);
       expect(body).toMatch(/\*\*Push\*\*: `shipyard:sandbox push`/);
       expect(body).toMatch(/\*\*Open a PR\*\*/);
-      expect(body).toMatch(/Do NOT run `git commit`, `git push`, or `gh pr create` directly/);
+      // The warning about interception makes the ban explicit even if
+      // Claude doesn't read the bullets.
+      expect(body).toMatch(/intercepted/);
       // Points Claude at the per-branch task history file.
       expect(body).toContain(taskFilePath("demo-slug"));
     } finally {

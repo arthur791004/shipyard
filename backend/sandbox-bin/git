@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Sandbox git wrapper. Intercepts the git subcommands that are unsafe to run
+# directly in the claude sandbox:
+#
+#  - `git commit`: the worktree is bind-mounted from the host, and the
+#    macOS/linux git versions disagree on the index format, so a sandbox-
+#    side commit corrupts the index ("unknown index entry format 0x…").
+#
+#  - `git push`: the sandbox has no SSH keys and no `gh` auth — those live
+#    on the host.
+#
+# Both get routed through the shipyard:sandbox CLI, which calls the host
+# backend which runs the real git command in the host context. Every other
+# git subcommand (status/add/log/diff/branch/...) passes through untouched.
+set -euo pipefail
+
+REAL_GIT=""
+for candidate in /usr/bin/git /usr/local/bin/git /bin/git; do
+  if [ -x "$candidate" ]; then REAL_GIT="$candidate"; break; fi
+done
+if [ -z "$REAL_GIT" ]; then
+  echo "error: sandbox git wrapper couldn't find the real git binary" >&2
+  exit 127
+fi
+
+# Find the first non-option arg — the subcommand. Skip flags and the
+# values of the handful of git top-level options that take an argument
+# (-C <path>, --git-dir=<path>, etc.).
+subcommand=""
+skip=0
+for arg in "$@"; do
+  if [ "$skip" = "1" ]; then
+    skip=0
+    continue
+  fi
+  case "$arg" in
+    -C|--git-dir|--work-tree|-c|--namespace|--super-prefix|--list-cmds)
+      skip=1 ;;
+    -*) ;;
+    *) subcommand="$arg"; break ;;
+  esac
+done
+
+case "$subcommand" in
+  commit)
+    cat >&2 <<'EOF'
+error: `git commit` in this sandbox corrupts the bind-mounted git index
+       (host and sandbox disagree on the index format).
+
+Use the host-mediated CLI instead:
+
+  shipyard:sandbox commit -m "your message"
+  shipyard:sandbox commit --amend [-m "new message"]
+EOF
+    exit 1
+    ;;
+  push)
+    cat >&2 <<'EOF'
+error: `git push` in this sandbox has no remote auth (SSH keys and gh
+       credentials live on the host).
+
+Use the host-mediated CLI instead:
+
+  shipyard:sandbox push
+EOF
+    exit 1
+    ;;
+  *)
+    exec "$REAL_GIT" "$@"
+    ;;
+esac
