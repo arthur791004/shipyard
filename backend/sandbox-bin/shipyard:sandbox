@@ -20,6 +20,8 @@ commands:
   push --title "TITLE"        set the PR title; if stdin has content it's used as
                               the PR body. Used when opening a NEW PR so the body
                               follows the repo's .github/pull_request_template.md.
+  push --dry-run              verify the flow without running git push or gh pr
+                              create/edit. Backend echoes what it would send.
 EOF
   exit 2
 }
@@ -71,19 +73,24 @@ case "$cmd" in
     ;;
   push)
     title=""
+    dryrun=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --title)
           [ $# -lt 2 ] && { echo "error: --title requires an argument" >&2; exit 2; }
           title="$2"; shift 2 ;;
+        --dry-run)
+          dryrun=1; shift ;;
         *)
           echo "error: unknown arg: $1" >&2; usage ;;
       esac
     done
 
     url="$BACKEND/api/branches/$BRANCH/push"
-    # Test/CI escape hatch — tells backend to skip the real git/gh calls.
-    if [ "${SHIPYARD_PUSH_DRYRUN:-}" = "1" ]; then
+    # Dry-run: backend echoes what it would do (title/body included) and
+    # skips the real git push + gh pr create/edit. Triggered either
+    # per-invocation via --dry-run or persistently via SHIPYARD_PUSH_DRYRUN=1.
+    if [ $dryrun -eq 1 ] || [ "${SHIPYARD_PUSH_DRYRUN:-}" = "1" ]; then
       url="$url?dryRun=1"
     fi
 

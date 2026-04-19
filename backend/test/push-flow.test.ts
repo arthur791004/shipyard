@@ -334,7 +334,7 @@ describe("shipyard:sandbox CLI", () => {
     expect(stderr).toMatch(/SHIPYARD_BRANCH_ID/);
   });
 
-  it("push (dry-run) calls backend and prints synthetic PR response", async () => {
+  it("push (dry-run via SHIPYARD_PUSH_DRYRUN env) calls backend and prints synthetic PR response", async () => {
     const { code, stdout, stderr } = await runCli(["push"], {
       SHIPYARD_BRANCH_ID: BRANCH_ID,
       SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
@@ -344,6 +344,41 @@ describe("shipyard:sandbox CLI", () => {
     const body = JSON.parse(stdout);
     expect(body.dryRun).toBe(true);
     expect(body.url).toMatch(/^dry-run:/);
+  });
+
+  it("push --dry-run flag triggers dry-run without the env var", async () => {
+    const { code, stdout, stderr } = await runCli(["push", "--dry-run"], {
+      SHIPYARD_BRANCH_ID: BRANCH_ID,
+      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+      // Deliberately NOT setting SHIPYARD_PUSH_DRYRUN.
+    });
+    expect(code, `stderr=${stderr}`).toBe(0);
+    const body = JSON.parse(stdout);
+    expect(body.dryRun).toBe(true);
+  });
+
+  it("push --dry-run works alongside --title + stdin body", async () => {
+    const out = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(CLI_PATH, ["push", "--title", "Test title", "--dry-run"], {
+        env: {
+          ...process.env,
+          SHIPYARD_BRANCH_ID: BRANCH_ID,
+          SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+      child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+      child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+      child.stdin.write("Part of #1\n\n## Proposed Changes\n\n* x");
+      child.stdin.end();
+    });
+    expect(out.code, `stderr=${out.stderr}`).toBe(0);
+    const body = JSON.parse(out.stdout);
+    expect(body.dryRun).toBe(true);
+    expect(body.title).toBe("Test title");
+    expect(body.body).toContain("Proposed Changes");
   });
 
   it("push --title + stdin body passes both through to the backend", async () => {

@@ -176,6 +176,7 @@ const SANDBOX_CLAUDE_MD = [
   "",
   "  On the FIRST push this creates the PR with your title + body. On LATER pushes (PR already exists) it **rewrites the PR description** to match the body you just provided, so keep the body in sync with what the branch now contains. If the human reviewer has edited checkboxes or added commentary in a previous body, note that your push will overwrite those edits — preserve them in the body you pipe in.",
   "- **Bare push** (no title, no stdin body): `shipyard:sandbox push` alone just pushes commits. If a PR exists its description is left untouched; if no PR exists yet one is created with `gh pr create --fill` (title/body from the last commit — template is ignored). Use this only for throwaway branches.",
+  "- **Dry-run** (verify the flow without touching origin or the PR): append `--dry-run` to any `push` invocation. The backend echoes what it would send (title/body if provided, the synthetic PR URL) and skips the real `git push` / `gh pr create|edit`. Handy to sanity-check your PR body before it lands.",
   "- Do NOT run `git commit`, `git push`, or `gh pr create` directly.",
   "- Other git subcommands (`status`, `add`, `diff`, `log`, `branch`, ...) work normally.",
   "- You CAN run `yarn install` and start the dev server if you need to test changes.",
