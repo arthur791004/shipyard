@@ -10,6 +10,7 @@ import {
   Tooltip,
 } from "@chakra-ui/react";
 import { api, Repo } from "./api";
+import { GearIcon } from "./Icons";
 import { toaster } from "./Toaster";
 
 async function syncRepo(repo: Repo, onChanged: () => void, setBusy: (s: string | null) => void) {
@@ -113,7 +114,7 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged, onSettings }: Pro
                 aria-label="Settings"
                 onClick={onSettings}
               >
-                ⚙
+                <GearIcon />
               </Button>
             </Tooltip.Trigger>
             <Portal>
