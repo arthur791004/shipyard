@@ -1,20 +1,23 @@
-// End-to-end test for the shipyard:sandbox push flow.
+// End-to-end tests for the shipyard:sandbox CLI (commit + push flows).
 //
-// Layer 1 — backend /api/branches/:id/push endpoint behaviour (via Fastify
-//           inject): 404 for unknown branch, 400 for trunk, 400 for
-//           missing worktree, dry-run returns the synthetic PR shape
-//           without running git/gh.
+// Layer 1 — backend endpoint behaviour via Fastify inject:
+//           /push: 404/400 preconditions and dry-run response shape.
+//           /commit: 404/400 preconditions, create commit, --amend with
+//           new message, --amend --no-edit, nothing-to-commit surfacing.
+//           Commit tests run against a real tmp git repo (tag test-initial
+//           marks the pristine state) since commits are local — no need
+//           for a dry-run path.
 //
 // Layer 2 — the CLI script itself: invokes shipyard:sandbox as a subprocess
-//           against a real booted backend (127.0.0.1 on an ephemeral port)
-//           with SHIPYARD_PUSH_DRYRUN=1, so we exercise the PATH wiring,
-//           curl call, and env-var plumbing exactly as Claude would inside
-//           the sandbox — but without touching a real git remote.
+//           against a real booted backend (127.0.0.1 on an ephemeral port).
+//           Push uses SHIPYARD_PUSH_DRYRUN=1 so we skip the remote; commit
+//           exercises real git through the backend.
 //
 // Layer 3 — CLAUDE.md injection produces the text that tells Claude to use
-//           `shipyard:sandbox push`. This is the context a new chat reads
-//           on startup, so it's load-bearing for the automated flow.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+//           `shipyard:sandbox commit` and `shipyard:sandbox push`. This is
+//           the context a new chat reads on startup, so it's load-bearing
+//           for the automated flow.
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import Fastify, { FastifyInstance } from "fastify";
 import { spawn } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -30,16 +33,19 @@ process.env.DATA_DIR = tmpDataDir;
 const state = await import("../src/state.js");
 const { registerRoutes } = await import("../src/routes.js");
 const { injectTaskIntoClaudeMd, taskFilePath } = await import("../src/tasks.js");
+const { runOrThrow } = await import("../src/shell.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "..", "sandbox-bin", "shipyard:sandbox");
 
 const REPO_ID = "test-repo";
 const BRANCH_ID = "test-branch";
+const COMMIT_BRANCH_ID = "commit-branch";
 
 let app: FastifyInstance;
 let port: number;
 let tmpWorktree: string;
+let commitWorktree: string;
 
 beforeAll(async () => {
   await state.loadState();
@@ -78,6 +84,29 @@ beforeAll(async () => {
     createdAt: now,
   });
 
+  // A real git repo for the commit endpoint + CLI tests. `test-initial` is
+  // a tag marking the pristine state so each test can reset back to it.
+  commitWorktree = await fsp.mkdtemp(path.join(os.tmpdir(), "shipyard-commit-"));
+  await runOrThrow("git", ["init", "-q"], { cwd: commitWorktree });
+  await runOrThrow("git", ["config", "user.email", "test@example.com"], { cwd: commitWorktree });
+  await runOrThrow("git", ["config", "user.name", "Shipyard Test"], { cwd: commitWorktree });
+  // Make sure no global GPG signing / pre-commit config can break the tests.
+  await runOrThrow("git", ["config", "commit.gpgsign", "false"], { cwd: commitWorktree });
+  await fsp.writeFile(path.join(commitWorktree, "README.md"), "initial\n");
+  await runOrThrow("git", ["add", "."], { cwd: commitWorktree });
+  await runOrThrow("git", ["commit", "-q", "-m", "initial"], { cwd: commitWorktree });
+  await runOrThrow("git", ["tag", "test-initial"], { cwd: commitWorktree });
+
+  await state.upsertBranch({
+    id: COMMIT_BRANCH_ID,
+    name: "commit-test",
+    repoId: REPO_ID,
+    worktreePath: commitWorktree,
+    port: 4102,
+    status: "running",
+    createdAt: now,
+  });
+
   app = Fastify({ logger: false });
   await registerRoutes(app);
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -88,7 +117,13 @@ afterAll(async () => {
   await app.close();
   await fsp.rm(tmpDataDir, { recursive: true, force: true });
   await fsp.rm(tmpWorktree, { recursive: true, force: true });
+  await fsp.rm(commitWorktree, { recursive: true, force: true });
 });
+
+async function resetCommitWorktree(): Promise<void> {
+  await runOrThrow("git", ["reset", "--hard", "-q", "test-initial"], { cwd: commitWorktree });
+  await runOrThrow("git", ["clean", "-fdq"], { cwd: commitWorktree });
+}
 
 // -------- Layer 1: endpoint behaviour --------
 
@@ -122,6 +157,119 @@ describe("POST /api/branches/:id/push", () => {
     expect(body.dryRun).toBe(true);
     expect(body.created).toBe(false);
     expect(body.url).toMatch(/^dry-run:/);
+  });
+});
+
+describe("POST /api/branches/:id/commit", () => {
+  beforeEach(resetCommitWorktree);
+
+  const commitHeaders = { "content-type": "text/plain" };
+
+  it("returns 404 for unknown branch", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/branches/does-not-exist/commit",
+      payload: "msg",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("rejects trunk with 400", async () => {
+    const trunkId = state.trunkBranchId(REPO_ID);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/branches/${trunkId}/commit`,
+      payload: "msg",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/trunk/);
+  });
+
+  it("rejects branch with no worktree", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/branches/no-wt-branch/commit",
+      payload: "msg",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: "no worktree" });
+  });
+
+  it("rejects empty body when not amending", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/branches/${COMMIT_BRANCH_ID}/commit`,
+      payload: "",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/message/i);
+  });
+
+  it("stages all changes and creates a new commit", async () => {
+    await fsp.writeFile(path.join(commitWorktree, "new.txt"), "hi\n");
+    const initialSha = (await runOrThrow("git", ["rev-parse", "test-initial"], { cwd: commitWorktree })).trim();
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/branches/${COMMIT_BRANCH_ID}/commit`,
+      payload: "add new file",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.message).toBe("add new file");
+    expect(body.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(body.sha).not.toBe(initialSha);
+    const count = (await runOrThrow("git", ["rev-list", "--count", "HEAD"], { cwd: commitWorktree })).trim();
+    expect(count).toBe("2");
+  });
+
+  it("amend with new message rewrites HEAD in place", async () => {
+    const initialSha = (await runOrThrow("git", ["rev-parse", "HEAD"], { cwd: commitWorktree })).trim();
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/branches/${COMMIT_BRANCH_ID}/commit?amend=1`,
+      payload: "reworded",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.message).toBe("reworded");
+    expect(body.sha).not.toBe(initialSha);
+    const count = (await runOrThrow("git", ["rev-list", "--count", "HEAD"], { cwd: commitWorktree })).trim();
+    expect(count).toBe("1");
+  });
+
+  it("amend with empty body (--no-edit) folds new changes into HEAD and keeps the message", async () => {
+    await fsp.writeFile(path.join(commitWorktree, "additional.txt"), "extra\n");
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/branches/${COMMIT_BRANCH_ID}/commit?amend=1`,
+      payload: "",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.message).toBe("initial");
+    const count = (await runOrThrow("git", ["rev-list", "--count", "HEAD"], { cwd: commitWorktree })).trim();
+    expect(count).toBe("1");
+    const files = (await runOrThrow("git", ["ls-tree", "--name-only", "HEAD"], { cwd: commitWorktree })).trim().split("\n");
+    expect(files).toContain("additional.txt");
+  });
+
+  it("surfaces `nothing to commit` as 500", async () => {
+    // Worktree is reset to test-initial; nothing to stage.
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/branches/${COMMIT_BRANCH_ID}/commit`,
+      payload: "no changes",
+      headers: commitHeaders,
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/git commit failed/);
   });
 });
 
@@ -192,16 +340,77 @@ describe("shipyard:sandbox CLI", () => {
   });
 });
 
+describe("shipyard:sandbox commit CLI", () => {
+  beforeEach(resetCommitWorktree);
+
+  it("errors with exit 2 when neither -m nor --amend is given", async () => {
+    const { code, stderr } = await runCli(["commit"], {
+      SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
+      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+    });
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/-m/);
+  });
+
+  it("errors with exit 2 when -m is missing its argument", async () => {
+    const { code, stderr } = await runCli(["commit", "-m"], {
+      SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
+      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+    });
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/-m requires an argument/);
+  });
+
+  it("commit -m stages and commits via the backend", async () => {
+    await fsp.writeFile(path.join(commitWorktree, "cli-test.txt"), "hello from CLI\n");
+    const { code, stdout, stderr } = await runCli(["commit", "-m", "from CLI"], {
+      SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
+      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+    });
+    expect(code, `stderr=${stderr}`).toBe(0);
+    const body = JSON.parse(stdout);
+    expect(body.message).toBe("from CLI");
+    expect(body.sha).toMatch(/^[0-9a-f]{40}$/);
+    const files = (await runOrThrow("git", ["ls-tree", "--name-only", "HEAD"], { cwd: commitWorktree })).trim().split("\n");
+    expect(files).toContain("cli-test.txt");
+  });
+
+  it("commit -m preserves a multi-line message verbatim", async () => {
+    await fsp.writeFile(path.join(commitWorktree, "multi.txt"), "x\n");
+    const body = "subject line\n\nbody paragraph with %percent% and \"quotes\"";
+    const { code, stderr } = await runCli(["commit", "-m", body], {
+      SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
+      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+    });
+    expect(code, `stderr=${stderr}`).toBe(0);
+    const stored = (await runOrThrow("git", ["log", "-1", "--format=%B"], { cwd: commitWorktree })).trim();
+    expect(stored).toBe(body);
+  });
+
+  it("commit --amend -m rewrites the HEAD message", async () => {
+    const { code, stdout, stderr } = await runCli(["commit", "--amend", "-m", "reworded via CLI"], {
+      SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
+      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
+    });
+    expect(code, `stderr=${stderr}`).toBe(0);
+    const body = JSON.parse(stdout);
+    expect(body.message).toBe("reworded via CLI");
+    const count = (await runOrThrow("git", ["rev-list", "--count", "HEAD"], { cwd: commitWorktree })).trim();
+    expect(count).toBe("1");
+  });
+});
+
 // -------- Layer 3: CLAUDE.md injection guides Claude to the CLI --------
 
 describe("injectTaskIntoClaudeMd", () => {
-  it("writes a Sandbox-rules section that tells Claude to run shipyard:sandbox push", async () => {
+  it("writes a Sandbox-rules section that points Claude at shipyard:sandbox for commits and pushes", async () => {
     const worktree = await fsp.mkdtemp(path.join(os.tmpdir(), "shipyard-cmd-"));
     try {
       await injectTaskIntoClaudeMd(worktree, "demo-slug");
       const body = await fsp.readFile(path.join(worktree, "CLAUDE.md"), "utf8");
+      expect(body).toMatch(/shipyard:sandbox commit/);
       expect(body).toMatch(/shipyard:sandbox push/);
-      expect(body).toMatch(/Do NOT use `git push` directly/);
+      expect(body).toMatch(/Do NOT run `git commit` or `git push` directly/);
       // Points Claude at the per-branch task history file.
       expect(body).toContain(taskFilePath("demo-slug"));
     } finally {

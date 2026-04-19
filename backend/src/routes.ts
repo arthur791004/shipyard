@@ -54,6 +54,11 @@ function slugify(input: string): string {
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  // Accept raw commit messages as text/plain bodies from shipyard:sandbox commit.
+  app.addContentTypeParser("text/plain", { parseAs: "string" }, (_req, body, done) => {
+    done(null, body);
+  });
+
   async function cloneRepo(repoPath: string, sourceRepo: string, branch: string): Promise<void> {
     const fs = await import("node:fs/promises");
     await fs.mkdir(path.dirname(repoPath), { recursive: true });
@@ -742,6 +747,50 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(500).send({ error: `gh pr create failed: ${err.message}` });
     }
   });
+
+  // Host-mediated commit — the bind-mounted worktree's git index can't be
+  // safely written from inside the sandbox (cross-version format mismatch
+  // with the host). Claude calls this via `shipyard:sandbox commit` instead.
+  app.post<{ Params: { id: string }; Querystring: { amend?: string }; Body: string }>(
+    "/api/branches/:id/commit",
+    async (req, reply) => {
+      const branch = getBranch(req.params.id);
+      if (!branch) return reply.code(404).send({ error: "not found" });
+      if (isTrunk(branch)) return reply.code(400).send({ error: "cannot commit to trunk" });
+      if (!branch.worktreePath) return reply.code(400).send({ error: "no worktree" });
+
+      const amend = req.query?.amend === "1";
+      const message = typeof req.body === "string" ? req.body : "";
+      if (!amend && !message) {
+        return reply.code(400).send({ error: "commit message required" });
+      }
+
+      try {
+        await runOrThrow("git", ["add", "-A"], { cwd: branch.worktreePath });
+      } catch (err: any) {
+        return reply.code(500).send({ error: `git add failed: ${err.message}` });
+      }
+
+      const commitArgs = ["commit"];
+      if (amend) commitArgs.push("--amend");
+      if (message) commitArgs.push("-m", message);
+      else if (amend) commitArgs.push("--no-edit");
+
+      try {
+        await runOrThrow("git", commitArgs, { cwd: branch.worktreePath });
+      } catch (err: any) {
+        return reply.code(500).send({ error: `git commit failed: ${err.message}` });
+      }
+
+      try {
+        const sha = (await runOrThrow("git", ["rev-parse", "HEAD"], { cwd: branch.worktreePath })).trim();
+        const subject = (await runOrThrow("git", ["log", "-1", "--format=%s"], { cwd: branch.worktreePath })).trim();
+        return { sha, message: subject };
+      } catch (err: any) {
+        return reply.code(500).send({ error: `failed to read HEAD: ${err.message}` });
+      }
+    }
+  );
 
   // Pull latest changes from origin into the clone's default branch.
   app.post<{ Params: { id: string } }>("/api/repos/:id/sync", async (req, reply) => {

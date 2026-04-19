@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # shipyard:sandbox — CLI bridge for sandboxed Claude to invoke host-mediated
-# operations (push, create PR) via the backend API. Env vars SHIPYARD_BRANCH_ID
-# and SHIPYARD_BACKEND_URL are injected by sandbox.ts when the session starts.
+# git operations via the backend API. The bind-mounted worktree's git index
+# can't be safely written from inside the sandbox (cross-version format
+# mismatch with the host), so commits and pushes both route to the host.
+# Env vars SHIPYARD_BRANCH_ID and SHIPYARD_BACKEND_URL are injected by
+# sandbox.ts when the session starts.
 set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-usage: shipyard:sandbox <command>
+usage: shipyard:sandbox <command> [args]
 
 commands:
-  push    push the current branch and create/update its PR
+  commit -m <msg> [--amend]   stage all changes and commit on the host
+  commit --amend              amend the previous commit without changing its message
+  push                        push the current branch and create/update its PR
 EOF
   exit 2
 }
@@ -26,6 +31,39 @@ if [ -z "$BRANCH" ]; then
 fi
 
 case "$cmd" in
+  commit)
+    message=""
+    amend=0
+    has_m=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -m)
+          [ $# -lt 2 ] && { echo "error: -m requires an argument" >&2; exit 2; }
+          message="$2"
+          has_m=1
+          shift 2
+          ;;
+        --amend)
+          amend=1
+          shift
+          ;;
+        *)
+          echo "error: unknown arg: $1" >&2
+          usage
+          ;;
+      esac
+    done
+    if [ $amend -eq 0 ] && [ $has_m -eq 0 ]; then
+      echo "error: -m <message> required (or use --amend)" >&2
+      exit 2
+    fi
+    url="$BACKEND/api/branches/$BRANCH/commit"
+    [ $amend -eq 1 ] && url="$url?amend=1"
+    # printf '%s' preserves embedded newlines and % verbatim; --data-binary
+    # @- streams the message body from stdin so we don't have to escape.
+    printf '%s' "$message" | curl -sS --fail-with-body -X POST \
+      -H "Content-Type: text/plain" --data-binary @- "$url"
+    ;;
   push)
     url="$BACKEND/api/branches/$BRANCH/push"
     # Test/CI escape hatch — tells backend to skip the real git/gh calls.
