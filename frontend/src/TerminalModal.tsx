@@ -393,7 +393,48 @@ export function TerminalModal({
           </Text>
         </Flex>
       )}
-      <Box flex="1" p={4} overflow="hidden" ref={containerRef} css={{ ".xterm": { height: "100%" } }} />
+      <Box
+        flex="1"
+        p={4}
+        overflow="hidden"
+        ref={containerRef}
+        css={{
+          ".xterm": { height: "100%" },
+          // Style the xterm viewport scrollbar to match the dark terminal
+          // chrome. The default is a fat white bar that's jarring against
+          // the #0a0c10 background; we want something thin, translucent,
+          // and only visible on hover.
+          ".xterm .xterm-viewport": {
+            scrollbarWidth: "thin",
+            scrollbarColor: "rgba(255,255,255,0.15) transparent",
+            transition: "scrollbar-color 160ms",
+          },
+          ".xterm .xterm-viewport:hover": {
+            scrollbarColor: "rgba(255,255,255,0.3) transparent",
+          },
+          ".xterm .xterm-viewport::-webkit-scrollbar": {
+            width: "10px",
+            height: "10px",
+          },
+          ".xterm .xterm-viewport::-webkit-scrollbar-track": {
+            background: "transparent",
+          },
+          ".xterm .xterm-viewport::-webkit-scrollbar-thumb": {
+            background: "rgba(255,255,255,0.15)",
+            borderRadius: "8px",
+            border: "2px solid transparent",
+            backgroundClip: "padding-box",
+            transition: "background 160ms",
+          },
+          ".xterm .xterm-viewport::-webkit-scrollbar-thumb:hover": {
+            background: "rgba(255,255,255,0.3)",
+            backgroundClip: "padding-box",
+          },
+          ".xterm .xterm-viewport::-webkit-scrollbar-corner": {
+            background: "transparent",
+          },
+        }}
+      />
     </Flex>
   );
 }
