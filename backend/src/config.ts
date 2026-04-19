@@ -35,8 +35,6 @@ export const config = {
   dockerImage: process.env.DOCKER_IMAGE ?? "claude",
   claudeAuthDir: process.env.CLAUDE_AUTH_DIR ?? path.join(os.homedir(), ".claude"),
   claudeSandboxDir: process.env.CLAUDE_SANDBOX_DIR ?? path.join(os.homedir(), ".claude-sandbox"),
-  /** Used by llm.ts to generate short branch names from free-form prompts. */
-  anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   portRangeStart: 4001,
   portRangeEnd: 4999,
   maxConcurrentSandboxes: Number(process.env.MAX_SANDBOXES ?? 9),

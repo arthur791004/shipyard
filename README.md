@@ -74,7 +74,6 @@ Fastify backend (:9090)
 | `MAX_SANDBOXES` | `9` | Max concurrent branch sessions |
 | `SANDBOX_IDLE_MS` | `1800000` | Auto-stop after 30 min idle |
 | `LINEAR_API_KEY` | — | Pre-fetch Linear ticket content |
-| `ANTHROPIC_API_KEY` | — | Generate short branch names from free-form prompts (falls back to a slug if unset) |
 | `DOCKER_IMAGE` | `claude` | Sandbox Docker image |
 
 ## Keyboard shortcuts

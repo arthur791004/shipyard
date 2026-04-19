@@ -112,16 +112,23 @@ describe("slugify / firstNWords fallback", () => {
 });
 
 describe("generateBranchName (llm.ts)", () => {
-  it("returns null when ANTHROPIC_API_KEY is unset", async () => {
-    // Save-and-clear the env var for this test; the import captured the
-    // (unset) value at module load, so this is belt-and-suspenders.
-    const prev = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    try {
-      const { generateBranchName } = await import("../src/llm.js");
-      expect(await generateBranchName("add dark mode toggle")).toBeNull();
-    } finally {
-      if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+  it("returns null or a valid kebab-case name (never throws, never returns garbage)", async () => {
+    // The implementation shells out to `claude -p`. Whether the CLI is
+    // available + authed on this machine is environment-dependent, so we
+    // only assert the contract: either null (fallback path) or a name
+    // matching the expected pattern. Timeout is 15s in the helper; give
+    // vitest plenty of headroom.
+    const { generateBranchName } = await import("../src/llm.js");
+    const result = await generateBranchName("add dark mode toggle");
+    if (result !== null) {
+      expect(result).toMatch(/^[a-z0-9]+(-[a-z0-9]+){0,4}$/);
+      expect(result.length).toBeLessThanOrEqual(24);
     }
+  }, 20_000);
+
+  it("returns null for empty / whitespace-only input without spawning anything", async () => {
+    const { generateBranchName } = await import("../src/llm.js");
+    expect(await generateBranchName("")).toBeNull();
+    expect(await generateBranchName("   \n  ")).toBeNull();
   });
 });
