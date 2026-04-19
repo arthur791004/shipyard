@@ -106,15 +106,15 @@ export function repoSandboxName(repo: Repo): string {
   return `claude-${repo.name}`;
 }
 
-// Host path to the sandbox-bin directory. Every file in here gets copied
-// into /home/agent/.local/bin inside the sandbox on each ensureRepoSandbox
-// call — the sandbox user ('agent') owns that dir and it's already first
-// in PATH, so the binaries shadow /usr/bin/* (e.g. our `git` wrapper
-// intercepts `git commit` / `git push`). We don't bind-mount because
-// (a) existing sandboxes won't pick up new mounts without recreation, and
-// (b) copying keeps the scripts resident even if the mount is torn down.
-const SANDBOX_BIN_SRC = path.join(config.projectRoot, "backend", "sandbox-bin");
-const SANDBOX_BIN_DEST = "/home/agent/.local/bin";
+// Host path to the shipyard:sandbox CLI source. On each ensureRepoSandbox
+// call we copy the script into /home/agent/.local/bin inside the sandbox
+// (already writable and on PATH), so Claude can invoke it regardless of
+// whether the sandbox is fresh or was created before shipyard:sandbox
+// existed. We do not bind-mount the dir because (a) existing sandboxes
+// won't pick up a new mount without being recreated, and (b) copying keeps
+// the script resident even if the mount is torn down.
+const SHIPYARD_CLI_SRC = path.join(config.projectRoot, "backend", "sandbox-bin", "shipyard:sandbox");
+const SHIPYARD_CLI_DEST = "/home/agent/.local/bin/shipyard:sandbox";
 
 // Docker Sandboxes route sandbox-outbound traffic through an HTTP proxy
 // with a default-deny rule on localhost ports (the backend's `host.docker.internal:<port>`
@@ -128,33 +128,22 @@ async function ensureSandboxProxyAllowsBackend(sandboxName: string): Promise<voi
   ]);
 }
 
-async function copyFileIntoSandbox(
-  sandboxName: string,
-  content: string,
-  destPath: string,
-): Promise<void> {
+async function installShipyardCli(sandboxName: string): Promise<void> {
+  const cli = await fsp.readFile(SHIPYARD_CLI_SRC, "utf8");
   await new Promise<void>((resolve, reject) => {
     const child = spawn(resolveDockerPath(), [
       "sandbox", "exec", "-i", sandboxName, "sh", "-c",
-      `mkdir -p "$(dirname '${destPath}')" && cat > '${destPath}' && chmod +x '${destPath}'`,
+      `mkdir -p "$(dirname '${SHIPYARD_CLI_DEST}')" && cat > '${SHIPYARD_CLI_DEST}' && chmod +x '${SHIPYARD_CLI_DEST}'`,
     ], { stdio: ["pipe", "pipe", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
     child.on("error", reject);
     child.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`copy ${destPath} exit ${code}: ${stderr}`))
+      code === 0 ? resolve() : reject(new Error(`installShipyardCli exit ${code}: ${stderr}`))
     );
-    child.stdin.write(content);
+    child.stdin.write(cli);
     child.stdin.end();
   });
-}
-
-async function installSandboxBin(sandboxName: string): Promise<void> {
-  const files = await fsp.readdir(SANDBOX_BIN_SRC);
-  for (const file of files) {
-    const content = await fsp.readFile(path.join(SANDBOX_BIN_SRC, file), "utf8");
-    await copyFileIntoSandbox(sandboxName, content, `${SANDBOX_BIN_DEST}/${file}`);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,8 +347,8 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
     try { await ensureSandboxProxyAllowsBackend(name); } catch (err) {
       console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
     }
-    try { await installSandboxBin(name); } catch (err) {
-      console.warn(`installSandboxBin(${name}) failed:`, err);
+    try { await installShipyardCli(name); } catch (err) {
+      console.warn(`installShipyardCli(${name}) failed:`, err);
     }
     return name;
   }
@@ -432,10 +421,9 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
     console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
   }
 
-  // Install everything in backend/sandbox-bin/ into the sandbox's PATH
-  // (shipyard:sandbox CLI + git wrapper that blocks commit/push).
-  try { await installSandboxBin(name); } catch (err) {
-    console.warn(`installSandboxBin(${name}) failed:`, err);
+  // Install the shipyard:sandbox CLI into /home/agent/.local/bin.
+  try { await installShipyardCli(name); } catch (err) {
+    console.warn(`installShipyardCli(${name}) failed:`, err);
   }
 
   return name;
