@@ -9,9 +9,11 @@
 //           for a dry-run path.
 //
 // Layer 2 — the CLI script itself: invokes shipyard:sandbox as a subprocess
-//           against a real booted backend (127.0.0.1 on an ephemeral port).
-//           Push uses SHIPYARD_PUSH_DRYRUN=1 so we skip the remote; commit
-//           exercises real git through the backend.
+//           pointed at a shared RPC dir (SHIPYARD_RPC_DIR), with the rpc
+//           watcher running in-process. Request/response files flow end
+//           to end, exercising the same plumbing Claude uses from inside
+//           the sandbox. Push uses SHIPYARD_PUSH_DRYRUN=1 to skip the
+//           real remote; commit exercises real git through the backend.
 //
 // Layer 3 — CLAUDE.md injection produces the text that tells Claude to use
 //           `shipyard:sandbox commit` and `shipyard:sandbox push`. This is
@@ -25,13 +27,16 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-// Must set DATA_DIR before importing anything that reads config, because
-// config.ts captures process.env.DATA_DIR at module-load time.
+// Must set DATA_DIR + SHIPYARD_RPC_DIR before importing anything that
+// reads config / rpc.ts, because they capture the env at module-load time.
 const tmpDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), "shipyard-test-"));
+const tmpRpcDir = await fsp.mkdtemp(path.join(os.tmpdir(), "shipyard-rpc-"));
 process.env.DATA_DIR = tmpDataDir;
+process.env.SHIPYARD_RPC_DIR = tmpRpcDir;
 
 const state = await import("../src/state.js");
 const { registerRoutes } = await import("../src/routes.js");
+const { startRpcWatcher } = await import("../src/rpc.js");
 const { injectTaskIntoClaudeMd, taskFilePath } = await import("../src/tasks.js");
 const { runOrThrow } = await import("../src/shell.js");
 
@@ -46,6 +51,7 @@ let app: FastifyInstance;
 let port: number;
 let tmpWorktree: string;
 let commitWorktree: string;
+let stopRpcWatcher: () => void;
 
 beforeAll(async () => {
   await state.loadState();
@@ -111,11 +117,14 @@ beforeAll(async () => {
   await registerRoutes(app);
   await app.listen({ port: 0, host: "127.0.0.1" });
   port = (app.server.address() as { port: number }).port;
+  stopRpcWatcher = await startRpcWatcher(app);
 });
 
 afterAll(async () => {
+  stopRpcWatcher?.();
   await app.close();
   await fsp.rm(tmpDataDir, { recursive: true, force: true });
+  await fsp.rm(tmpRpcDir, { recursive: true, force: true });
   await fsp.rm(tmpWorktree, { recursive: true, force: true });
   await fsp.rm(commitWorktree, { recursive: true, force: true });
 });
@@ -273,12 +282,21 @@ describe("POST /api/branches/:id/commit", () => {
   });
 });
 
-// -------- Layer 2: CLI subprocess --------
+// -------- Layer 2: CLI subprocess + RPC bridge --------
 
-function runCli(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+function runCli(
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(CLI_PATH, args, {
-      env: { ...process.env, ...env },
+      env: {
+        ...process.env,
+        // Tests run the CLI against the shared tmp RPC dir; the watcher in
+        // beforeAll is already polling it, so requests flow end-to-end.
+        SHIPYARD_RPC_DIR: tmpRpcDir,
+        ...env,
+      },
     });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
@@ -291,7 +309,6 @@ describe("shipyard:sandbox CLI", () => {
   it("prints usage when no command is given", async () => {
     const { code, stderr } = await runCli([], {
       SHIPYARD_BRANCH_ID: BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code).toBe(2);
     expect(stderr).toMatch(/usage/i);
@@ -300,16 +317,23 @@ describe("shipyard:sandbox CLI", () => {
   it("errors with exit 1 when SHIPYARD_BRANCH_ID is unset", async () => {
     const { code, stderr } = await runCli(["push"], {
       SHIPYARD_BRANCH_ID: "",
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code).toBe(1);
     expect(stderr).toMatch(/SHIPYARD_BRANCH_ID/);
   });
 
-  it("push (dry-run) calls backend and prints synthetic PR response", async () => {
+  it("errors with exit 1 when SHIPYARD_RPC_DIR is unset", async () => {
+    const { code, stderr } = await runCli(["push"], {
+      SHIPYARD_BRANCH_ID: BRANCH_ID,
+      SHIPYARD_RPC_DIR: "",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/SHIPYARD_RPC_DIR/);
+  });
+
+  it("push (dry-run) reaches the backend via RPC and prints the synthetic PR response", async () => {
     const { code, stdout, stderr } = await runCli(["push"], {
       SHIPYARD_BRANCH_ID: BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
       SHIPYARD_PUSH_DRYRUN: "1",
     });
     expect(code, `stderr=${stderr}`).toBe(0);
@@ -318,25 +342,32 @@ describe("shipyard:sandbox CLI", () => {
     expect(body.url).toMatch(/^dry-run:/);
   });
 
-  it("surfaces backend 404 as a non-zero exit", async () => {
+  it("surfaces backend 404 as exit 22 (body on stdout)", async () => {
     const { code, stdout } = await runCli(["push"], {
       SHIPYARD_BRANCH_ID: "does-not-exist",
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
       SHIPYARD_PUSH_DRYRUN: "1",
     });
-    expect(code).not.toBe(0);
-    // --fail-with-body makes curl still write the response body to stdout
-    // (its own "curl: (22)..." message goes to stderr).
+    expect(code).toBe(22);
     expect(stdout).toMatch(/not found/);
   });
 
   it("rejects unknown subcommand with exit 2", async () => {
     const { code, stderr } = await runCli(["bogus"], {
       SHIPYARD_BRANCH_ID: BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code).toBe(2);
     expect(stderr).toMatch(/usage/i);
+  });
+
+  it("cleans up request + body files after the backend responds", async () => {
+    await runCli(["push"], {
+      SHIPYARD_BRANCH_ID: BRANCH_ID,
+      SHIPYARD_PUSH_DRYRUN: "1",
+    });
+    const leftover = (await fsp.readdir(tmpRpcDir)).filter((f) =>
+      /\.(req|body|\d{3}|tmp)$/.test(f)
+    );
+    expect(leftover).toEqual([]);
   });
 });
 
@@ -346,7 +377,6 @@ describe("shipyard:sandbox commit CLI", () => {
   it("errors with exit 2 when neither -m nor --amend is given", async () => {
     const { code, stderr } = await runCli(["commit"], {
       SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code).toBe(2);
     expect(stderr).toMatch(/-m/);
@@ -355,17 +385,15 @@ describe("shipyard:sandbox commit CLI", () => {
   it("errors with exit 2 when -m is missing its argument", async () => {
     const { code, stderr } = await runCli(["commit", "-m"], {
       SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code).toBe(2);
     expect(stderr).toMatch(/-m requires an argument/);
   });
 
-  it("commit -m stages and commits via the backend", async () => {
+  it("commit -m stages and commits via the RPC bridge", async () => {
     await fsp.writeFile(path.join(commitWorktree, "cli-test.txt"), "hello from CLI\n");
     const { code, stdout, stderr } = await runCli(["commit", "-m", "from CLI"], {
       SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code, `stderr=${stderr}`).toBe(0);
     const body = JSON.parse(stdout);
@@ -380,7 +408,6 @@ describe("shipyard:sandbox commit CLI", () => {
     const body = "subject line\n\nbody paragraph with %percent% and \"quotes\"";
     const { code, stderr } = await runCli(["commit", "-m", body], {
       SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code, `stderr=${stderr}`).toBe(0);
     const stored = (await runOrThrow("git", ["log", "-1", "--format=%B"], { cwd: commitWorktree })).trim();
@@ -390,7 +417,6 @@ describe("shipyard:sandbox commit CLI", () => {
   it("commit --amend -m rewrites the HEAD message", async () => {
     const { code, stdout, stderr } = await runCli(["commit", "--amend", "-m", "reworded via CLI"], {
       SHIPYARD_BRANCH_ID: COMMIT_BRANCH_ID,
-      SHIPYARD_BACKEND_URL: `http://127.0.0.1:${port}`,
     });
     expect(code, `stderr=${stderr}`).toBe(0);
     const body = JSON.parse(stdout);

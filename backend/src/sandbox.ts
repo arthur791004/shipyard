@@ -23,6 +23,7 @@ import path from "node:path";
 import pty, { IPty } from "node-pty";
 import { run, runOrThrow } from "./shell.js";
 import { config } from "./config.js";
+import { getRpcDir } from "./rpc.js";
 import { listAllBranches, updateBranch, Repo } from "./state.js";
 
 // ---------------------------------------------------------------------------
@@ -106,10 +107,33 @@ export function repoSandboxName(repo: Repo): string {
   return `claude-${repo.name}`;
 }
 
-// Host path to the shipyard:sandbox CLI dir. Bind-mounted into every repo
-// sandbox at the same path and prepended to PATH so Claude can call
-// `shipyard:sandbox push` to trigger host-side git operations.
-const SHIPYARD_BIN_DIR = path.join(config.projectRoot, "backend", "sandbox-bin");
+// Host path to the shipyard:sandbox CLI source. On each ensureRepoSandbox
+// call we copy the script into /home/agent/.local/bin inside the sandbox
+// (already writable and on PATH), so Claude can invoke it regardless of
+// whether the sandbox is fresh or was created before shipyard:sandbox
+// existed. We do not bind-mount the dir because (a) existing sandboxes
+// won't pick up a new mount without being recreated, and (b) copying keeps
+// the script resident even if the mount is torn down.
+const SHIPYARD_CLI_SRC = path.join(config.projectRoot, "backend", "sandbox-bin", "shipyard:sandbox");
+const SHIPYARD_CLI_DEST = "/home/agent/.local/bin/shipyard:sandbox";
+
+async function installShipyardCli(sandboxName: string): Promise<void> {
+  const cli = await fsp.readFile(SHIPYARD_CLI_SRC, "utf8");
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(resolveDockerPath(), [
+      "sandbox", "exec", "-i", sandboxName, "sh", "-c",
+      `mkdir -p "$(dirname '${SHIPYARD_CLI_DEST}')" && cat > '${SHIPYARD_CLI_DEST}' && chmod +x '${SHIPYARD_CLI_DEST}'`,
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`installShipyardCli exit ${code}: ${stderr}`))
+    );
+    child.stdin.write(cli);
+    child.stdin.end();
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Sandbox existence / status
@@ -305,7 +329,14 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
   await reconcileSandboxState();
 
   const status = await getSandboxStatus(name);
-  if (status === "running") return name;
+  if (status === "running") {
+    // Already running — just re-install the CLI in case it's stale or
+    // missing (e.g. sandbox was created before shipyard:sandbox existed).
+    try { await installShipyardCli(name); } catch (err) {
+      console.warn(`installShipyardCli(${name}) failed:`, err);
+    }
+    return name;
+  }
 
   if (status === "missing") {
     await fsp.mkdir(config.claudeSandboxDir, { recursive: true });
@@ -314,7 +345,6 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
       repo.worktreesDir,    // contains trunk + all branch worktrees
       config.claudeSandboxDir,
       config.tasksDir,
-      SHIPYARD_BIN_DIR,     // shipyard:sandbox CLI for host-mediated ops
     ];
     // Also mount the original repo if it's different (for git objects)
     if (repo.linkTarget && !mounts.includes(repo.linkTarget)) {
@@ -370,6 +400,11 @@ export async function ensureRepoSandbox(repo: Repo): Promise<string> {
   try { await syncCredentialsIn(name); } catch {}
   try { await syncClaudeConfigIn(name); } catch {}
 
+  // Install the shipyard:sandbox CLI into /home/agent/.local/bin.
+  try { await installShipyardCli(name); } catch (err) {
+    console.warn(`installShipyardCli(${name}) failed:`, err);
+  }
+
   return name;
 }
 
@@ -409,14 +444,15 @@ export async function startBranchSession(
 
   const dockerPath = resolveDockerPath();
   const execArgs = ["sandbox", "exec", "-it", "-w", worktreePath];
-  // Prepend the shipyard bin dir to PATH and inject branch/backend context so
-  // the sandboxed Claude can invoke `shipyard:sandbox push` via the CLI.
-  // Env assignments before `exec` set them only for the claude process + its
-  // children (shell subprocesses for its Bash tool inherit them).
+  // The shipyard:sandbox CLI is installed into /home/agent/.local/bin (already
+  // on PATH via /etc/profile in the claude image). We only need to inject the
+  // branch + RPC-dir context so the CLI knows who it is and where to drop
+  // request files. Env assignments before `exec` set them only for the
+  // claude process + its children (shells spawned by Claude's Bash tool
+  // inherit them via execve).
   const shellCmd =
-    `PATH=${SHIPYARD_BIN_DIR}:$PATH ` +
     `SHIPYARD_BRANCH_ID=${branchId} ` +
-    `SHIPYARD_BACKEND_URL=http://host.docker.internal:${config.port} ` +
+    `SHIPYARD_RPC_DIR=${getRpcDir()} ` +
     `exec claude --dangerously-skip-permissions`;
   execArgs.push(sandboxName, "sh", "-lc", shellCmd);
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# shipyard:sandbox — CLI bridge for sandboxed Claude to invoke host-mediated
-# git operations via the backend API. The bind-mounted worktree's git index
-# can't be safely written from inside the sandbox (cross-version format
-# mismatch with the host), so commits and pushes both route to the host.
-# Env vars SHIPYARD_BRANCH_ID and SHIPYARD_BACKEND_URL are injected by
-# sandbox.ts when the session starts.
+# shipyard:sandbox — file-based RPC bridge from sandboxed Claude to the host
+# backend. The sandbox's egress proxy blocks the backend's HTTP port, so we
+# drop request files into a bind-mounted directory and poll for a response
+# file. See backend/src/rpc.ts for the host side of this protocol.
+#
+# Env vars (injected by sandbox.ts when the claude session starts):
+#   SHIPYARD_BRANCH_ID  — the branch this sandbox belongs to
+#   SHIPYARD_RPC_DIR    — path to the shared RPC dir (bind-mounted from host)
 set -euo pipefail
 
 usage() {
@@ -23,18 +25,33 @@ cmd="${1:-}"
 shift || true
 [ -z "$cmd" ] && usage
 
-BACKEND="${SHIPYARD_BACKEND_URL:-http://host.docker.internal:9090}"
 BRANCH="${SHIPYARD_BRANCH_ID:-}"
+RPC_DIR="${SHIPYARD_RPC_DIR:-}"
 if [ -z "$BRANCH" ]; then
   echo "error: SHIPYARD_BRANCH_ID not set in sandbox env" >&2
   exit 1
 fi
+if [ -z "$RPC_DIR" ]; then
+  echo "error: SHIPYARD_RPC_DIR not set in sandbox env" >&2
+  exit 1
+fi
+
+mkdir -p "$RPC_DIR"
+
+# Unique request id — avoid collisions across parallel invocations.
+if command -v uuidgen >/dev/null 2>&1; then
+  id=$(uuidgen | tr -d '-' | head -c 16)
+else
+  id="$(date +%s%N)-$$"
+fi
+
+message=""
+amend=0
+has_m=0
+qs=""
 
 case "$cmd" in
   commit)
-    message=""
-    amend=0
-    has_m=0
     while [ $# -gt 0 ]; do
       case "$1" in
         -m)
@@ -57,24 +74,62 @@ case "$cmd" in
       echo "error: -m <message> required (or use --amend)" >&2
       exit 2
     fi
-    url="$BACKEND/api/branches/$BRANCH/commit"
-    [ $amend -eq 1 ] && url="$url?amend=1"
-    # printf '%s' preserves embedded newlines and % verbatim; --data-binary
-    # @- streams the message body from stdin so we don't have to escape.
-    printf '%s' "$message" | curl -sS --fail-with-body -X POST \
-      -H "Content-Type: text/plain" --data-binary @- "$url"
+    [ $amend -eq 1 ] && qs="amend=1"
+    # Write body first (so it's in place when the backend picks up the .req).
+    printf '%s' "$message" > "$RPC_DIR/$id.body.tmp"
+    mv "$RPC_DIR/$id.body.tmp" "$RPC_DIR/$id.body"
     ;;
   push)
-    url="$BACKEND/api/branches/$BRANCH/push"
-    # Test/CI escape hatch — tells backend to skip the real git/gh calls.
-    if [ "${SHIPYARD_PUSH_DRYRUN:-}" = "1" ]; then
-      url="$url?dryRun=1"
+    if [ $# -gt 0 ]; then
+      echo "error: unknown arg: $1" >&2
+      usage
     fi
-    # No body is sent, so don't set Content-Type (Fastify's JSON parser
-    # rejects an empty body when content-type is application/json).
-    exec curl -sS --fail-with-body -X POST "$url"
+    # Test/CI escape hatch — tells backend to skip the real git/gh calls.
+    [ "${SHIPYARD_PUSH_DRYRUN:-}" = "1" ] && qs="dryRun=1"
     ;;
   *)
     usage
     ;;
 esac
+
+# Drop the request file last. Atomic mv means the backend never sees a
+# partial line.
+printf '%s %s %s' "$cmd" "$BRANCH" "$qs" > "$RPC_DIR/$id.req.tmp"
+mv "$RPC_DIR/$id.req.tmp" "$RPC_DIR/$id.req"
+
+# Poll for <id>.<status>. 60-second budget at 100ms tick.
+cleanup() {
+  rm -f "$RPC_DIR/$id.req" "$RPC_DIR/$id.body" 2>/dev/null || true
+}
+
+iters=600
+while [ $iters -gt 0 ]; do
+  for f in "$RPC_DIR/$id."*; do
+    [ -f "$f" ] || continue
+    base="${f##*/}"
+    suffix="${base#"$id."}"
+    case "$suffix" in
+      req|body|*.tmp) continue ;;
+    esac
+    # Response files have a 3-digit HTTP status as the extension.
+    case "$suffix" in
+      [0-9][0-9][0-9]) ;;
+      *) continue ;;
+    esac
+    body=$(cat "$f")
+    rm -f "$f"
+    cleanup
+    printf '%s' "$body"
+    if [ "$suffix" -ge 200 ] && [ "$suffix" -lt 300 ]; then
+      exit 0
+    else
+      exit 22
+    fi
+  done
+  sleep 0.1
+  iters=$((iters - 1))
+done
+
+echo "error: timeout waiting for backend (60s)" >&2
+cleanup
+exit 1

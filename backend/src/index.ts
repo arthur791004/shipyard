@@ -17,6 +17,7 @@ import {
 } from "./state.js";
 import { ensureSession } from "./sessions.js";
 import { registerRoutes } from "./routes.js";
+import { startRpcWatcher } from "./rpc.js";
 import { registerTerminal } from "./terminal.js";
 import {
   ensureRepoSandbox,
@@ -65,6 +66,7 @@ async function main() {
   await app.register(websocket);
   await registerRoutes(app);
   await registerTerminal(app);
+  await startRpcWatcher(app);
 
   app.addHook("onRequest", async (req, reply) => {
     if (!req.url.startsWith("/preview")) return;
