@@ -78,17 +78,72 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged, onSettings }: Pro
 
   return (
     <Menu.Root>
-      <Menu.Trigger asChild>
-        <Button size="sm" variant="ghost" w="100%" justifyContent="space-between">
-          <HStack gap={2} minW={0}>
-            {busy === "activate" && <Spinner size="xs" />}
-            <Text truncate fontFamily="mono" fontSize="sm">
-              {active?.name ?? "No repo"}
-            </Text>
-          </HStack>
-          <Text color="gray.500" ml={2}>▾</Text>
-        </Button>
-      </Menu.Trigger>
+      {/*
+        The trigger row: repo name + chevron (opens the switcher dropdown),
+        plus inline action buttons for the frequently-used per-repo ops
+        (settings, pull latest). The actions sit OUTSIDE <Menu.Trigger> so
+        clicking them doesn't pop the menu — they always target the
+        currently-active repo.
+      */}
+      <HStack gap={1} w="100%">
+        <Menu.Trigger asChild>
+          <Button
+            size="sm"
+            variant="ghost"
+            flex={1}
+            minW={0}
+            justifyContent="space-between"
+            px={2}
+          >
+            <HStack gap={2} minW={0}>
+              {busy === "activate" && <Spinner size="xs" />}
+              <Text truncate fontFamily="mono" fontSize="sm">
+                {active?.name ?? "No repo"}
+              </Text>
+            </HStack>
+            <Text color="gray.500" ml={2}>▾</Text>
+          </Button>
+        </Menu.Trigger>
+        {active && onSettings && (
+          <Tooltip.Root openDelay={300}>
+            <Tooltip.Trigger asChild>
+              <Button
+                size="2xs"
+                variant="ghost"
+                aria-label="Settings"
+                onClick={onSettings}
+              >
+                ⚙
+              </Button>
+            </Tooltip.Trigger>
+            <Portal>
+              <Tooltip.Positioner>
+                <Tooltip.Content>Settings</Tooltip.Content>
+              </Tooltip.Positioner>
+            </Portal>
+          </Tooltip.Root>
+        )}
+        {active && (
+          <Tooltip.Root openDelay={300}>
+            <Tooltip.Trigger asChild>
+              <Button
+                size="2xs"
+                variant="ghost"
+                aria-label="Pull latest"
+                loading={busy === `sync:${active.id}`}
+                onClick={() => syncRepo(active, onChanged, setBusy)}
+              >
+                ↻
+              </Button>
+            </Tooltip.Trigger>
+            <Portal>
+              <Tooltip.Positioner>
+                <Tooltip.Content>Pull latest</Tooltip.Content>
+              </Tooltip.Positioner>
+            </Portal>
+          </Tooltip.Root>
+        )}
+      </HStack>
       <Portal>
         <Menu.Positioner>
           <Menu.Content minW="260px">
@@ -110,70 +165,28 @@ export function RepoSwitcher({ repos, activeRepoId, onChanged, onSettings }: Pro
                       </Badge>
                     )}
                   </HStack>
-                  <HStack gap={1}>
-                    {onSettings && r.id === activeRepoId && (
-                      <Tooltip.Root openDelay={300}>
-                        <Tooltip.Trigger asChild>
-                          <Button
-                            size="2xs"
-                            variant="ghost"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onSettings();
-                            }}
-                          >
-                            ⚙
-                          </Button>
-                        </Tooltip.Trigger>
-                        <Portal>
-                          <Tooltip.Positioner>
-                            <Tooltip.Content>Settings</Tooltip.Content>
-                          </Tooltip.Positioner>
-                        </Portal>
-                      </Tooltip.Root>
-                    )}
-                    <Tooltip.Root openDelay={300}>
-                      <Tooltip.Trigger asChild>
-                        <Button
-                          size="2xs"
-                          variant="ghost"
-                          loading={busy === `sync:${r.id}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            syncRepo(r, onChanged, setBusy);
-                          }}
-                        >
-                          ↻
-                        </Button>
-                      </Tooltip.Trigger>
-                      <Portal>
-                        <Tooltip.Positioner>
-                          <Tooltip.Content>Pull latest</Tooltip.Content>
-                        </Tooltip.Positioner>
-                      </Portal>
-                    </Tooltip.Root>
-                    <Tooltip.Root openDelay={300}>
-                      <Tooltip.Trigger asChild>
-                        <Button
-                          size="2xs"
-                          variant="ghost"
-                          colorPalette="red"
-                          loading={busy === `remove:${r.id}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeRepo(r);
-                          }}
-                        >
-                          ✕
-                        </Button>
-                      </Tooltip.Trigger>
-                      <Portal>
-                        <Tooltip.Positioner>
-                          <Tooltip.Content>Remove repo</Tooltip.Content>
-                        </Tooltip.Positioner>
-                      </Portal>
-                    </Tooltip.Root>
-                  </HStack>
+                  <Tooltip.Root openDelay={300}>
+                    <Tooltip.Trigger asChild>
+                      <Button
+                        size="2xs"
+                        variant="ghost"
+                        colorPalette="red"
+                        aria-label="Remove repo"
+                        loading={busy === `remove:${r.id}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeRepo(r);
+                        }}
+                      >
+                        ✕
+                      </Button>
+                    </Tooltip.Trigger>
+                    <Portal>
+                      <Tooltip.Positioner>
+                        <Tooltip.Content>Remove repo</Tooltip.Content>
+                      </Tooltip.Positioner>
+                    </Portal>
+                  </Tooltip.Root>
                 </HStack>
               </Menu.Item>
             ))}
