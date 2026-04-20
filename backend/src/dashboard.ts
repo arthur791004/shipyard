@@ -1,4 +1,5 @@
 import net from "node:net";
+import path from "node:path";
 import pty from "node-pty";
 import { ensureSharedPty, killSharedPty } from "./sharedPty.js";
 import {
@@ -6,9 +7,17 @@ import {
   DEFAULT_DASHBOARD_START_CMD,
   getActiveRepo,
 } from "./state.js";
+import { config } from "./config.js";
 
 export function dashboardKey(worktreePath: string): string {
   return `dashboard:${worktreePath}`;
+}
+
+/** Log file path for a dashboard PTY — survives backend restarts. */
+export function dashboardLogFile(worktreePath: string): string {
+  // Use a stable name derived from the worktree path
+  const safe = worktreePath.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return path.join(config.dataDir, "logs", `dashboard-${safe}.log`);
 }
 
 export function isPortOpen(port: number): Promise<boolean> {
@@ -32,14 +41,17 @@ export async function ensureDashboardRunning(worktreePath: string, port: number)
   const installCmd = repo?.dashboardInstallCmd?.trim() || DEFAULT_DASHBOARD_INSTALL_CMD;
   const startCmd = repo?.dashboardStartCmd?.trim() || DEFAULT_DASHBOARD_START_CMD;
   const shellCmd = `${installCmd} && PORT=${port} ${startCmd}`;
-  ensureSharedPty(dashboardKey(worktreePath), () =>
-    pty.spawn("/bin/sh", ["-lc", shellCmd], {
-      name: "xterm-256color",
-      cols: 120,
-      rows: 30,
-      cwd: worktreePath,
-      env: process.env as { [key: string]: string },
-    })
+  ensureSharedPty(
+    dashboardKey(worktreePath),
+    () =>
+      pty.spawn("/bin/sh", ["-lc", shellCmd], {
+        name: "xterm-256color",
+        cols: 120,
+        rows: 30,
+        cwd: worktreePath,
+        env: process.env as { [key: string]: string },
+      }),
+    { logFile: dashboardLogFile(worktreePath) },
   );
 }
 

@@ -13,6 +13,8 @@ import {
   Stack,
   Text,
 } from "@chakra-ui/react";
+import { ShipyardIcon } from "./Icons";
+import { COMMANDS } from "./commands";
 import { api, SystemCheck } from "./api";
 import { toaster } from "./Toaster";
 
@@ -111,7 +113,10 @@ export function Welcome({ onDone }: Props) {
         flexDirection="column"
       >
         <Flex justify="space-between" align="center" mb={6}>
-          <Heading size="lg">Shipyard</Heading>
+          <HStack gap={2}>
+            <ShipyardIcon width={32} height={16} />
+            <Heading size="lg">Shipyard</Heading>
+          </HStack>
           <StepDots current={step} />
         </Flex>
         <Box flex={1} display="flex" flexDirection="column">
@@ -123,15 +128,11 @@ export function Welcome({ onDone }: Props) {
               workspace. Kick off several at once and check in on any of them from one window.
             </Text>
             <Stack gap={2} color="gray.400" fontSize="sm">
-              <BulletRow>
-                <Code>/gh-issue &lt;url&gt;</Code> — Claude implements a GitHub issue.
-              </BulletRow>
-              <BulletRow>
-                <Code>/linear &lt;url&gt;</Code> — Claude implements a Linear ticket.
-              </BulletRow>
-              <BulletRow>
-                <Code>/branch &lt;name&gt;</Code> — a blank workspace for anything else.
-              </BulletRow>
+              {COMMANDS.map((cmd) => (
+                <BulletRow key={cmd.verb}>
+                  <Code>{cmd.usage}</Code> — {cmd.desc}.
+                </BulletRow>
+              ))}
             </Stack>
             <Flex justify="flex-end" mt="auto">
               <Button colorPalette="blue" onClick={() => setStep(1)}>

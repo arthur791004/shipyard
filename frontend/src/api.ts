@@ -22,6 +22,7 @@ export interface Repo {
   dashboardInstallCmd?: string;
   dashboardStartCmd?: string;
   previewUrl?: string;
+  sandboxName?: string;
   createdAt: number;
 }
 
@@ -34,6 +35,12 @@ export interface Settings {
   repoUrl: string;
   configured: boolean;
   maxConcurrentSandboxes?: number;
+  /**
+   * When on, every `shipyard:sandbox push` from the sandbox is silently
+   * routed through the backend's dry-run path — no git push, no PR
+   * created on origin. Toggled from the Settings modal.
+   */
+  pushDryRun?: boolean;
 }
 
 export interface Session {
@@ -126,10 +133,8 @@ export const api = {
     fetch(`/api/branches/${encodeURIComponent(id)}/logs`).then(j<{ logs: string }>),
   remove: (id: string) =>
     fetch(`/api/branches/${encodeURIComponent(id)}`, { method: "DELETE" }).then(j<{ ok: true }>),
-  pushAndPR: (id: string) =>
-    fetch(`/api/branches/${encodeURIComponent(id)}/push`, { method: "POST" }).then(
-      j<{ url: string; created: boolean }>
-    ),
+  getPr: (id: string) =>
+    fetch(`/api/branches/${encodeURIComponent(id)}/pr`).then(j<{ url: string | null }>),
   syncRepo: (id: string) =>
     fetch(`/api/repos/${id}/sync`, { method: "POST" }).then(j<{ ok: true }>),
   sessions: () => fetch("/api/sessions").then(j<{ sessions: Session[] }>),

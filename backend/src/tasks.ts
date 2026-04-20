@@ -9,7 +9,7 @@ import { config } from "./config.js";
 
 export interface TaskEntry {
   type: "task";
-  command: "/gh-issue" | "/linear" | "/branch";
+  command: "/gh-issue" | "/linear" | "/branch" | "/chat";
   source?: string;
   body?: string;
   port?: number;
@@ -37,33 +37,47 @@ export async function appendTaskEntry(slug: string, entry: TaskFileEntry): Promi
   await fsp.appendFile(taskFilePath(slug), JSON.stringify(entry) + "\n", "utf8");
 }
 
-// Inject a task section into the worktree's CLAUDE.md so Claude reads it
-// automatically on startup. Appends a fenced section at the end; if the
-// file already has our marker, it replaces the section in-place.
-const TASK_MARKER = "<!-- shipyard:task -->";
+// Seed prompt written into the claude PTY at session start. Points Claude
+// at the task history file directly — we deliberately don't inject anything
+// into the worktree's CLAUDE.md so the checkout stays pristine (no phantom
+// diff against the repo). Sandbox rules (including the commit/push CLI)
+// live in the sandbox user's global ~/.claude/CLAUDE.md (see
+// syncSandboxConfig in sandbox.ts), so the seed just points at the task
+// and names the ship-it steps at the end.
+export function buildSeedPrompt(taskFile: string): string {
+  return [
+    `Read your task history at \`${taskFile}\` and start working on the most recent task entry.`,
+    "The file is appended over time — re-read it whenever you need more context.",
+    "When the implementation is done and tested, ship it:",
+    "1. `shipyard:sandbox commit -m \"<message>\"` to commit your changes.",
+    "2. Draft a PR body from `.github/pull_request_template.md` (if present) and pipe it in:",
+    "   `printf '%s' \"$pr_body\" | shipyard:sandbox push --title \"<title>\"`.",
+    "Report the PR URL back when push succeeds.",
+  ].join(" ");
+}
 
-export async function injectTaskIntoClaudeMd(
-  worktreePath: string,
-  slug: string
-): Promise<void> {
+// Inject read-only instructions into trunk's CLAUDE.md so Claude
+// doesn't modify files directly on the default branch.
+const TRUNK_MARKER = "<!-- shipyard:trunk -->";
+
+export async function injectTrunkClaudeMd(worktreePath: string): Promise<void> {
   const claudeMdPath = path.join(worktreePath, "CLAUDE.md");
-  const taskFile = taskFilePath(slug);
 
   const section = [
     "",
-    TASK_MARKER,
-    "## Current Task",
+    TRUNK_MARKER,
+    "## Shipyard — Trunk (read-only)",
     "",
-    `Your task history file is at \`${taskFile}\`.`,
-    "Read it, then start working on the most recent task entry.",
-    "The file is appended over time — re-read it whenever you need context.",
+    "You are running on the trunk branch in read-only mode.",
+    "Do NOT modify any files directly on trunk.",
     "",
-    "## Sandbox rules",
+    "If the user asks you to implement a GitHub issue, Linear ticket,",
+    "or make any code changes, you must:",
+    "1. Tell them to use `/gh-issue <url>`, `/linear <url>`, or `/branch <name>` to create a task.",
+    "2. You can read any file freely — answer questions, explain code, and discuss changes.",
     "",
-    "- Do NOT push or create PRs — the orchestrator on the host handles that.",
-    "- You CAN run `yarn install` and start the dev server if you need to test changes.",
-    "- The host forwards your sandbox port to the browser automatically.",
-    TASK_MARKER,
+    "You do NOT have permission to write files, run git commands, or make changes on trunk.",
+    TRUNK_MARKER,
   ].join("\n");
 
   let existing = "";
@@ -72,15 +86,9 @@ export async function injectTaskIntoClaudeMd(
   } catch {}
 
   const markerRegex = new RegExp(
-    `\\n?${TASK_MARKER}[\\s\\S]*?${TASK_MARKER}`,
+    `\\n?${TRUNK_MARKER}[\\s\\S]*?${TRUNK_MARKER}`,
     "g"
   );
   const cleaned = existing.replace(markerRegex, "");
   await fsp.writeFile(claudeMdPath, cleaned + section, "utf8");
-}
-
-// Short nudge for PTY injection — just tells Claude to start. The real
-// context comes from CLAUDE.md and the task file.
-export function buildSeedPrompt(): string {
-  return "Read CLAUDE.md and start working on the task.";
 }

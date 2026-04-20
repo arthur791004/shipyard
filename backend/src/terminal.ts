@@ -1,9 +1,9 @@
 import { FastifyInstance } from "fastify";
 import pty, { IPty } from "node-pty";
-import { getBranch, isTrunk } from "./state.js";
-import { attachSandbox, resolveDockerPath } from "./docker.js";
+import { getBranch, getRepo, isTrunk } from "./state.js";
+import { attachBranchSession, resolveDockerPath } from "./sandbox.js";
 import { attachSharedPty, ensureSharedPty } from "./sharedPty.js";
-import { dashboardKey, ensureDashboardRunning } from "./dashboard.js";
+import { dashboardKey, dashboardLogFile, ensureDashboardRunning } from "./dashboard.js";
 
 export async function registerTerminal(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string }; Querystring: { kind?: string } }>(
@@ -27,11 +27,15 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
           : "claude";
 
       if (kind === "dashboard") {
+        const logOpts = { logFile: dashboardLogFile(branch.worktreePath) };
         const onData = (data: string) => {
           try { socket.send(data); } catch {}
         };
-        let handle = attachSharedPty(dashboardKey(branch.worktreePath), onData);
+        // Try attaching — replays from log file even if PTY is dead
+        let handle = attachSharedPty(dashboardKey(branch.worktreePath), onData, logOpts);
         if (!handle) {
+          // No live PTY (log file was replayed above if it existed).
+          // Start the dashboard and attach to the fresh PTY.
           try {
             await ensureDashboardRunning(branch.worktreePath, branch.port);
           } catch (err) {
@@ -100,26 +104,24 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
         return;
       }
 
-      if (!branch.sandboxName) {
+      const repo = getRepo(branch.repoId);
+      if (!repo?.sandboxName) {
         try {
-          socket.send("\r\n[branch has no sandbox]\r\n");
+          socket.send("\r\n[no sandbox for repo]\r\n");
           socket.close();
         } catch {}
         return;
       }
 
       if (kind === "claude") {
+        // v2: attach by branch ID (sessions keyed by branchId, not sandboxName)
         const onData = (data: string) => {
           try { socket.send(data); } catch {}
         };
-        const handle = attachSandbox(branch.sandboxName, onData);
+        const handle = attachBranchSession(branch.id, onData);
         if (!handle) {
-          // PTY is gone (Claude exited). Don't auto-spawn a new session
-          // — that would lose the user's conversation context silently.
-          // Instead close the socket so the frontend shows the status bar
-          // and the user can explicitly restart via the refresh button.
           try {
-            socket.send("\r\n[sandbox not running — start the branch first]\r\n");
+            socket.send("\r\n[session not running — click to start]\r\n");
             socket.close();
           } catch {}
           return;
@@ -139,6 +141,11 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
         return;
       }
 
+      // Shell tab: exec a bash session inside the repo's sandbox
+      if (!repo?.sandboxName) {
+        try { socket.close(); } catch {}
+        return;
+      }
       const term = pty.spawn(
         resolveDockerPath(),
         [
@@ -147,7 +154,7 @@ export async function registerTerminal(app: FastifyInstance): Promise<void> {
           "-it",
           "-w",
           branch.worktreePath,
-          branch.sandboxName,
+          repo.sandboxName,
           "bash",
         ],
         {

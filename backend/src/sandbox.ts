@@ -1,0 +1,662 @@
+/**
+ * sandbox.ts — v2 sandbox model: one Docker sandbox per repo.
+ *
+ * The repo's sandbox is created once (via `docker sandbox run`) and persists
+ * across app restarts. Each branch starts a Claude process inside the sandbox
+ * via `docker sandbox exec`. Branches share the same VM, filesystem, Node/yarn
+ * install, and network — isolation is via git worktrees, not sandbox boundaries.
+ *
+ * Key concepts:
+ * - `repoSandboxName(repo)` → the single sandbox name for the repo
+ * - `ensureRepoSandbox(repo)` → create + start the sandbox if it doesn't exist
+ * - `startBranchSession(branchId, sandboxName, worktreePath, port, seedPrompt?)` → exec Claude
+ * - `stopBranchSession(branchId)` → kill the exec process
+ * - `attachBranchSession(branchId, onData)` → subscribe to PTY output
+ */
+
+import { execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import pty, { IPty } from "node-pty";
+import { run, runOrThrow } from "./shell.js";
+import { config } from "./config.js";
+import { listAllBranches, updateBranch, Repo } from "./state.js";
+
+// ---------------------------------------------------------------------------
+// Docker path resolution (reused from docker.ts)
+// ---------------------------------------------------------------------------
+
+let cachedDockerPath: string | null = null;
+
+export function resolveDockerPath(): string {
+  if (cachedDockerPath) return cachedDockerPath;
+  const candidates = [
+    "/usr/local/bin/docker",
+    "/opt/homebrew/bin/docker",
+    "/usr/bin/docker",
+    path.join(os.homedir(), ".orbstack/bin/docker"),
+    path.join(os.homedir(), ".rd/bin/docker"),
+    "/Applications/Docker.app/Contents/Resources/bin/docker",
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return (cachedDockerPath = c);
+  }
+  try {
+    const out = execFileSync("/bin/sh", ["-lc", "command -v docker"], {
+      encoding: "utf8",
+    }).trim();
+    if (out) return (cachedDockerPath = out);
+  } catch {}
+  return (cachedDockerPath = "docker");
+}
+
+// ---------------------------------------------------------------------------
+// PTY tracking — keyed by branchId (not sandbox name)
+// ---------------------------------------------------------------------------
+
+interface SessionPty {
+  term: IPty;
+  buffer: string;
+  subscribers: Set<(data: string) => void>;
+  lastActivity: number;
+  sandboxName: string;
+  branchId: string;
+}
+
+const sessions = new Map<string, SessionPty>();
+
+const SCROLLBACK_LIMIT = 100_000;
+
+// Flipped to true when the backend process is shutting down (SIGTERM /
+// SIGINT, typically a `tsx watch` reload). While it's set, the PTY
+// `onExit` handlers skip the "stopped" status update so rehydrate on the
+// next boot sees the branches still marked `running` and re-spawns them.
+// Otherwise every backend reload would leave the user's branches stranded
+// in `stopped` state and require a manual toggle to restart.
+let shuttingDown = false;
+
+export function markShuttingDown(): void {
+  shuttingDown = true;
+}
+
+export function runningBranchIds(): string[] {
+  return [...sessions.keys()];
+}
+
+export function sessionLastActivity(branchId: string): number | null {
+  return sessions.get(branchId)?.lastActivity ?? null;
+}
+
+export function attachBranchSession(
+  branchId: string,
+  onData: (data: string) => void
+): { unsubscribe: () => void; write: (data: string) => void; resize: (cols: number, rows: number) => void } | null {
+  const entry = sessions.get(branchId);
+  if (!entry) return null;
+  if (entry.buffer) onData(entry.buffer);
+  entry.subscribers.add(onData);
+  return {
+    unsubscribe: () => entry.subscribers.delete(onData),
+    write: (data: string) => {
+      entry.lastActivity = Date.now();
+      entry.term.write(data);
+    },
+    resize: (cols: number, rows: number) => {
+      try { entry.term.resize(cols, rows); } catch {}
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox name
+// ---------------------------------------------------------------------------
+
+export function repoSandboxName(repo: Repo): string {
+  return `claude-${repo.name}`;
+}
+
+// Host path to the shipyard:sandbox CLI source. On each ensureRepoSandbox
+// call we copy the script into /home/agent/.local/bin inside the sandbox
+// (already writable and on PATH), so Claude can invoke it regardless of
+// whether the sandbox is fresh or was created before shipyard:sandbox
+// existed. We do not bind-mount the dir because (a) existing sandboxes
+// won't pick up a new mount without being recreated, and (b) copying keeps
+// the script resident even if the mount is torn down.
+const SHIPYARD_CLI_SRC = path.join(config.projectRoot, "backend", "sandbox-bin", "shipyard:sandbox");
+const SHIPYARD_CLI_DEST = "/home/agent/.local/bin/shipyard:sandbox";
+
+// Docker Sandboxes route sandbox-outbound traffic through an HTTP proxy
+// with a default-deny rule on localhost ports (the backend's `host.docker.internal:<port>`
+// resolves to localhost from the proxy's POV and is blocked). This lifts
+// that single rule so the shipyard:sandbox CLI can reach the backend.
+// Idempotent — safe to run every time we ensure the sandbox is up.
+async function ensureSandboxProxyAllowsBackend(sandboxName: string): Promise<void> {
+  await runOrThrow(resolveDockerPath(), [
+    "sandbox", "network", "proxy", sandboxName,
+    "--allow-host", `localhost:${config.port}`,
+  ]);
+}
+
+// Small helper: stream `content` into a file inside the sandbox via
+// `docker sandbox exec -i ... cat > <path>`, then chmod +x if requested.
+async function writeFileIntoSandbox(
+  sandboxName: string,
+  destPath: string,
+  content: string,
+  opts: { executable?: boolean } = {},
+): Promise<void> {
+  const chmod = opts.executable ? ` && chmod +x '${destPath}'` : "";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(resolveDockerPath(), [
+      "sandbox", "exec", "-i", sandboxName, "sh", "-c",
+      `mkdir -p "$(dirname '${destPath}')" && cat > '${destPath}'${chmod}`,
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`write ${destPath} exit ${code}: ${stderr}`))
+    );
+    child.stdin.write(content);
+    child.stdin.end();
+  });
+}
+
+async function installShipyardCli(sandboxName: string): Promise<void> {
+  const cli = await fsp.readFile(SHIPYARD_CLI_SRC, "utf8");
+  await writeFileIntoSandbox(sandboxName, SHIPYARD_CLI_DEST, cli, { executable: true });
+}
+
+// Static rules written to the sandbox user's global CLAUDE.md. Claude Code
+// reads ~/.claude/CLAUDE.md as user-level memory for every session, so the
+// rules apply to every branch's claude without touching the worktree's own
+// CLAUDE.md (which would otherwise show as a diff against the repo).
+const SANDBOX_CLAUDE_MD = [
+  "# Shipyard sandbox rules",
+  "",
+  "`git commit` corrupts the bind-mounted index in this sandbox (host and sandbox git disagree on the format) and `git push` has no remote auth. Route both through the host via the `shipyard:sandbox` CLI:",
+  "",
+  "- **Commit**: `shipyard:sandbox commit -m \"msg\"` stages everything and commits. Add `--amend` (with or without `-m`) to fix the previous commit.",
+  "- **Push + create/update the PR**: before pushing, read `.github/pull_request_template.md` at the repo root (if it exists) and draft a title + body that fits its sections (Proposed Changes, Why, Testing Instructions, Pre-merge Checklist, ...). Pipe the body in and pass the title via `--title`:",
+  "",
+  "    ```",
+  "    printf '%s' \"$pr_body\" | shipyard:sandbox push --title \"short descriptive title\"",
+  "    ```",
+  "",
+  "  On the FIRST push this creates the PR with your title + body. On LATER pushes (PR already exists) it **rewrites the PR description** to match the body you just provided, so keep the body in sync with what the branch now contains. If the human reviewer has edited checkboxes or added commentary in a previous body, note that your push will overwrite those edits — preserve them in the body you pipe in.",
+  "- **Bare push** (no title, no stdin body): `shipyard:sandbox push` alone just pushes commits. If a PR exists its description is left untouched; if no PR exists yet one is created with `gh pr create --fill` (title/body from the last commit — template is ignored). Use this only for throwaway branches.",
+  "- **Dry-run** (verify the flow without touching origin or the PR): append `--dry-run` to any `push` invocation. The backend echoes what it would send (title/body if provided, the synthetic PR URL) and skips the real `git push` / `gh pr create|edit`. Handy to sanity-check your PR body before it lands.",
+  "- Do NOT run `git commit`, `git push`, or `gh pr create` directly.",
+  "- Other git subcommands (`status`, `add`, `diff`, `log`, `branch`, ...) work normally.",
+  "- You CAN run `yarn install` and start the dev server if you need to test changes.",
+  "- The host forwards your sandbox port to the browser automatically.",
+  "",
+].join("\n");
+
+async function syncSandboxConfig(sandboxName: string): Promise<void> {
+  await writeFileIntoSandbox(sandboxName, "/home/agent/.claude/CLAUDE.md", SANDBOX_CLAUDE_MD);
+}
+
+// Kill any claude processes left over from a previous backend run. When the
+// host-side Node process dies unexpectedly (crash, `kill -9`, sometimes
+// tsx-watch reloads), the `docker sandbox exec` children keep running as
+// orphans (PPID=0) inside the sandbox VM. Each claude session holds ~300MB
+// of RAM; in our 3.8GB sandbox they pile up fast and eventually OOM-kill
+// running sessions mid-work. Reap them on boot before rehydrating so the
+// memory budget is clean.
+async function reapOrphanClaudes(sandboxName: string): Promise<void> {
+  try {
+    await run(resolveDockerPath(), [
+      "sandbox", "exec", sandboxName, "sh", "-c",
+      // Two passes: TERM first, KILL anything still alive after 1s.
+      [
+        `ps -eo pid,ppid,cmd | awk '$2==0 && /claude --dangerously-skip-permissions/ {print $1}' | xargs -r kill -TERM 2>/dev/null`,
+        `sleep 1`,
+        `ps -eo pid,ppid,cmd | awk '$2==0 && /claude --dangerously-skip-permissions/ {print $1}' | xargs -r kill -KILL 2>/dev/null`,
+        `true`,
+      ].join("; "),
+    ]);
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox existence / status
+// ---------------------------------------------------------------------------
+
+export async function sandboxExists(name: string): Promise<boolean> {
+  const res = await run("docker", ["sandbox", "ls"]);
+  return res.stdout.split("\n").some((l) => l.trim().split(/\s+/)[0] === name);
+}
+
+export async function getSandboxStatus(name: string): Promise<"running" | "stopped" | "missing"> {
+  const res = await run("docker", ["sandbox", "ls"]);
+  for (const line of res.stdout.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts[0] === name) {
+      return parts[2] === "running" ? "running" : "stopped";
+    }
+  }
+  return "missing";
+}
+
+// ---------------------------------------------------------------------------
+// sandboxd reconciliation (reused from docker.ts)
+// ---------------------------------------------------------------------------
+
+const SANDBOXD_SOCK = path.join(os.homedir(), ".docker", "sandboxes", "sandboxd.sock");
+const SANDBOXES_VM_DIR = path.join(os.homedir(), ".docker", "sandboxes", "vm");
+
+function sandboxdRequest(method: string, url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { socketPath: SANDBOXD_SOCK, path: url, method, timeout: 5000 },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => (body += chunk));
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+          else reject(new Error(`sandboxd ${method} ${url} → ${res.statusCode}: ${body.trim()}`));
+        });
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("sandboxd request timeout")));
+    req.end();
+  });
+}
+
+export async function reconcileSandboxState(): Promise<void> {
+  let vms: { vm_name: string; status: string }[];
+  try {
+    const body = await sandboxdRequest("GET", "/vm");
+    vms = JSON.parse(body);
+  } catch {
+    return;
+  }
+  for (const vm of vms) {
+    if (vm.status !== "running") continue;
+    const sockPath = path.join(SANDBOXES_VM_DIR, vm.vm_name, "docker-public.sock");
+    try {
+      await fsp.access(sockPath);
+    } catch {
+      console.warn(`[${vm.vm_name}] reconciling stale "running" state`);
+      try {
+        await sandboxdRequest("POST", `/vm/${encodeURIComponent(vm.vm_name)}/stop`);
+      } catch (err) {
+        console.error(`[${vm.vm_name}] force-stop failed:`, err);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Credential / config sync (simplified from docker.ts)
+// ---------------------------------------------------------------------------
+
+const MOUNT_CREDS = `${config.claudeSandboxDir}/.credentials.json`;
+const AGENT_CREDS = "/home/agent/.claude/.credentials.json";
+const MOUNT_CONFIG = `${config.claudeSandboxDir}/.claude.json`;
+const AGENT_CONFIG = "/home/agent/.claude.json";
+
+export async function syncCredentialsIn(sandboxName: string): Promise<void> {
+  await runOrThrow(resolveDockerPath(), [
+    "sandbox", "exec", sandboxName, "sh", "-c",
+    `mkdir -p /home/agent/.claude && if [ -s ${MOUNT_CREDS} ]; then rm -rf ${AGENT_CREDS} && cp -f ${MOUNT_CREDS} ${AGENT_CREDS} && chmod 600 ${AGENT_CREDS}; fi`,
+  ]);
+}
+
+export async function syncCredentialsOut(sandboxName: string): Promise<void> {
+  if ((await getSandboxStatus(sandboxName)) !== "running") return;
+  await runOrThrow(resolveDockerPath(), [
+    "sandbox", "exec", sandboxName, "sh", "-c",
+    `if [ -s ${AGENT_CREDS} ]; then rm -rf ${MOUNT_CREDS} && cp -f ${AGENT_CREDS} ${MOUNT_CREDS} && chmod 600 ${MOUNT_CREDS}; fi`,
+  ]);
+}
+
+async function buildClaudeConfig(worktreePath?: string): Promise<string> {
+  let authFields: Record<string, unknown> = {};
+  try {
+    const host = JSON.parse(
+      await fsp.readFile(path.join(os.homedir(), ".claude.json"), "utf8")
+    );
+    authFields = {
+      oauthAccount: host.oauthAccount,
+      userID: host.userID,
+      anonymousId: host.anonymousId,
+    };
+  } catch {}
+
+  let mountConfig: Record<string, unknown> = {};
+  try {
+    mountConfig = JSON.parse(await fsp.readFile(MOUNT_CONFIG, "utf8"));
+  } catch {}
+
+  const mountProjects = (mountConfig as any).projects ?? {};
+  const worktreeOverrides: Record<string, unknown> = {};
+  if (worktreePath) {
+    let sourceEntry: Record<string, unknown> | undefined;
+    for (const entry of Object.values(mountProjects)) {
+      const e = entry as Record<string, unknown>;
+      if (Array.isArray(e?.allowedTools) && e.allowedTools.length > 0) {
+        sourceEntry = e;
+        break;
+      }
+    }
+    const tasksPatterns = [
+      `Read(${config.tasksDir}/)`,
+      `Read(${config.tasksDir}/**)`,
+    ];
+    const existingTools: string[] = Array.isArray(sourceEntry?.allowedTools)
+      ? (sourceEntry.allowedTools as string[]) : [];
+    const mergedTools = [...existingTools];
+    for (const p of tasksPatterns) {
+      if (!mergedTools.includes(p)) mergedTools.push(p);
+    }
+    worktreeOverrides[worktreePath] = {
+      ...(sourceEntry ?? {}),
+      allowedTools: mergedTools,
+      hasTrustDialogAccepted: true,
+      hasClaudeMdExternalIncludesApproved: true,
+      hasClaudeMdExternalIncludesWarningShown: true,
+      projectOnboardingSeenCount: 1,
+    };
+  }
+
+  return JSON.stringify({
+    ...authFields,
+    ...mountConfig,
+    hasCompletedOnboarding: true,
+    numStartups: (mountConfig as any).numStartups ?? 1,
+    effortCalloutDismissed: true,
+    effortCalloutV2Dismissed: true,
+    projects: { ...mountProjects, ...worktreeOverrides },
+  });
+}
+
+export async function syncClaudeConfigIn(sandboxName: string, worktreePath?: string): Promise<void> {
+  const configJson = await buildClaudeConfig(worktreePath);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(resolveDockerPath(), [
+      "sandbox", "exec", "-i", sandboxName, "sh", "-c",
+      `cat > ${AGENT_CONFIG} && chmod 600 ${AGENT_CONFIG}`,
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`syncClaudeConfigIn exit ${code}: ${stderr}`))
+    );
+    child.stdin.write(configJson);
+    child.stdin.end();
+  });
+}
+
+export async function syncClaudeConfigOut(sandboxName: string): Promise<void> {
+  if ((await getSandboxStatus(sandboxName)) !== "running") return;
+  await runOrThrow(resolveDockerPath(), [
+    "sandbox", "exec", sandboxName, "sh", "-c",
+    `if [ -s ${AGENT_CONFIG} ]; then rm -rf ${MOUNT_CONFIG} && cp -f ${AGENT_CONFIG} ${MOUNT_CONFIG} && chmod 600 ${MOUNT_CONFIG}; fi`,
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Repo-level sandbox lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Ensure the repo's sandbox exists and is running. Creates it if missing.
+ * Mounts: worktreesDir (contains all worktrees), .claude-sandbox, .tasks.
+ */
+export async function ensureRepoSandbox(repo: Repo): Promise<string> {
+  const name = repo.sandboxName || repoSandboxName(repo);
+  await reconcileSandboxState();
+
+  const status = await getSandboxStatus(name);
+  if (status === "running") {
+    // Already running — re-apply per-sandbox config that might be missing
+    // (e.g. sandbox was created before shipyard:sandbox existed). All
+    // calls are idempotent.
+    try { await ensureSandboxProxyAllowsBackend(name); } catch (err) {
+      console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
+    }
+    try { await reapOrphanClaudes(name); } catch {}
+    try { await installShipyardCli(name); } catch (err) {
+      console.warn(`installShipyardCli(${name}) failed:`, err);
+    }
+    try { await syncSandboxConfig(name); } catch (err) {
+      console.warn(`syncSandboxConfig(${name}) failed:`, err);
+    }
+    return name;
+  }
+
+  if (status === "missing") {
+    await fsp.mkdir(config.claudeSandboxDir, { recursive: true });
+    await fsp.mkdir(config.tasksDir, { recursive: true });
+    const mounts = [
+      repo.worktreesDir,    // contains trunk + all branch worktrees
+      config.claudeSandboxDir,
+      config.tasksDir,
+    ];
+    // Also mount the original repo if it's different (for git objects)
+    if (repo.linkTarget && !mounts.includes(repo.linkTarget)) {
+      mounts.push(repo.linkTarget);
+    }
+    try {
+      await runOrThrow("docker", [
+        "sandbox", "create", "--name", name,
+        config.dockerImage,
+        ...mounts,
+      ]);
+    } catch (err) {
+      if (await sandboxExists(name)) {
+        await run("docker", ["sandbox", "rm", name]);
+      }
+      throw err;
+    }
+  }
+
+  // Start the sandbox VM (status was "stopped" or we just created it)
+  // We use `docker sandbox run` in the background to start the VM,
+  // then kill the foreground process — the VM keeps running.
+  const dockerPath = resolveDockerPath();
+  const startProc = spawn(dockerPath, ["sandbox", "run", name], {
+    stdio: "ignore",
+    detached: true,
+  });
+  startProc.unref();
+  // Wait for the sandbox to become running
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if ((await getSandboxStatus(name)) === "running") break;
+  }
+
+  // Mark all directories as safe so git doesn't complain about ownership
+  // (sandbox runs as 'agent', worktrees owned by host user)
+  try {
+    await run(resolveDockerPath(), [
+      "sandbox", "exec", name, "sh", "-c",
+      "git config --global --add safe.directory '*' 2>/dev/null; true",
+    ]);
+  } catch {}
+
+  // Install yarn globally (needed for git hooks + dev server)
+  try {
+    await run(resolveDockerPath(), [
+      "sandbox", "exec", name, "sh", "-c",
+      "command -v yarn >/dev/null 2>&1 || npm install -g yarn >/dev/null 2>&1",
+    ]);
+  } catch {}
+
+  // Sync credentials + config
+  try { await syncCredentialsIn(name); } catch {}
+  try { await syncClaudeConfigIn(name); } catch {}
+
+  // Lift the default-deny rule for the backend port so shipyard:sandbox
+  // can reach the host API.
+  try { await ensureSandboxProxyAllowsBackend(name); } catch (err) {
+    console.warn(`ensureSandboxProxyAllowsBackend(${name}) failed:`, err);
+  }
+
+  // Install the shipyard:sandbox CLI into /home/agent/.local/bin.
+  try { await installShipyardCli(name); } catch (err) {
+    console.warn(`installShipyardCli(${name}) failed:`, err);
+  }
+
+  // Write sandbox rules to the agent user's global ~/.claude/CLAUDE.md so
+  // Claude Code picks them up without us touching the worktree.
+  try { await syncSandboxConfig(name); } catch (err) {
+    console.warn(`syncSandboxConfig(${name}) failed:`, err);
+  }
+
+  return name;
+}
+
+/**
+ * Stop and remove the repo's sandbox entirely.
+ */
+export async function removeRepoSandbox(sandboxName: string): Promise<void> {
+  // Kill all branch sessions first
+  for (const [branchId, session] of sessions) {
+    if (session.sandboxName === sandboxName) {
+      try { session.term.kill(); } catch {}
+      sessions.delete(branchId);
+    }
+  }
+  await run("docker", ["sandbox", "stop", sandboxName]).catch(() => {});
+  await run("docker", ["sandbox", "rm", sandboxName]).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Branch-level session lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Start a Claude session for a branch inside the repo's sandbox.
+ */
+export async function startBranchSession(
+  branchId: string,
+  sandboxName: string,
+  worktreePath: string,
+  port: number,
+  seedPrompt?: string
+): Promise<void> {
+  if (sessions.has(branchId)) return;
+
+  // Sync config for this worktree path
+  try { await syncClaudeConfigIn(sandboxName, worktreePath); } catch {}
+
+  const dockerPath = resolveDockerPath();
+  const execArgs = ["sandbox", "exec", "-it", "-w", worktreePath];
+  // The shipyard:sandbox CLI is installed into /home/agent/.local/bin
+  // (already on PATH in the claude image). We just need to tell the CLI
+  // which branch it's acting for and how to reach the host API. Env
+  // assignments before `exec` set them only for the claude process +
+  // its children (shells spawned by Claude's Bash tool inherit them
+  // via execve).
+  //
+  // When we have a seed prompt, pass it as claude's positional prompt
+  // arg (`claude [prompt]` starts an interactive session with the
+  // prompt already submitted). That's much more robust than typing
+  // into the PTY after the TUI comes up — the old bracketed-paste
+  // injection was fragile across claude versions and had timing races
+  // with the input box.
+  const envPrefix =
+    `SHIPYARD_BRANCH_ID=${branchId} ` +
+    `SHIPYARD_BACKEND_URL=http://host.docker.internal:${config.port} `;
+  const shellCmd = seedPrompt
+    ? `${envPrefix}exec claude --dangerously-skip-permissions "$1"`
+    : `${envPrefix}exec claude --dangerously-skip-permissions`;
+  execArgs.push(sandboxName, "sh", "-lc", shellCmd);
+  if (seedPrompt) {
+    // `sh -c <script> [arg0 arg1 …]` — arg0 becomes $0 (just a label,
+    // "shipyard-seed" here), arg1 becomes $1 (the actual prompt). This
+    // avoids having to shell-escape the prompt string.
+    execArgs.push("shipyard-seed", seedPrompt);
+  }
+
+  const term = pty.spawn(dockerPath, execArgs, {
+    name: "xterm-256color",
+    cols: 120,
+    rows: 30,
+    cwd: process.env.HOME || process.cwd(),
+    env: process.env as { [key: string]: string },
+  });
+
+  const entry: SessionPty = {
+    term,
+    buffer: "",
+    subscribers: new Set(),
+    lastActivity: Date.now(),
+    sandboxName,
+    branchId,
+  };
+
+  term.onData((data) => {
+    entry.lastActivity = Date.now();
+    entry.buffer = (entry.buffer + data).slice(-SCROLLBACK_LIMIT);
+    for (const sub of entry.subscribers) sub(data);
+  });
+
+  term.onExit(() => {
+    sessions.delete(branchId);
+    // When the whole backend is shutting down (tsx-watch reload, user
+    // Ctrl+C, etc.) don't mark the branch as stopped — the PTY is only
+    // dying because we are, and rehydrate on the next boot will spin it
+    // back up from the still-`running` state. Otherwise every restart
+    // would leave branches stranded.
+    if (shuttingDown) return;
+    const branch = listAllBranches().find((b) => b.id === branchId);
+    if (branch && branch.status === "running") {
+      updateBranch(branch.id, { status: "stopped" }).catch(() => {});
+    }
+    syncCredentialsOut(sandboxName).catch(() => {});
+    syncClaudeConfigOut(sandboxName).catch(() => {});
+  });
+
+  sessions.set(branchId, entry);
+}
+
+/**
+ * Stop a branch's Claude session (kill the exec process).
+ * Does NOT stop the sandbox VM.
+ */
+export async function stopBranchSession(branchId: string): Promise<void> {
+  const entry = sessions.get(branchId);
+  if (!entry) return;
+  try {
+    await syncCredentialsOut(entry.sandboxName);
+    await syncClaudeConfigOut(entry.sandboxName);
+  } catch {}
+  try { entry.term.kill(); } catch {}
+  sessions.delete(branchId);
+}
+
+/**
+ * Restart a branch's Claude session (kill old, start new).
+ */
+export async function restartBranchSession(
+  branchId: string,
+  sandboxName: string,
+  worktreePath: string,
+  port: number,
+  seedPrompt?: string
+): Promise<void> {
+  await stopBranchSession(branchId);
+  await startBranchSession(branchId, sandboxName, worktreePath, port, seedPrompt);
+}
+
+// ---------------------------------------------------------------------------
+// Utility exports
+// ---------------------------------------------------------------------------
+
+export async function sandboxLogs(sandboxName: string, tail = 200): Promise<string> {
+  const res = await run("docker", [
+    "sandbox", "exec", sandboxName, "sh", "-lc",
+    `tail -n ${tail} /var/log/*.log 2>/dev/null || true`,
+  ]);
+  return (res.stdout + res.stderr).trim();
+}

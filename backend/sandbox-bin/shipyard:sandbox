@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# shipyard:sandbox — CLI bridge for sandboxed Claude to invoke host-mediated
+# git operations via the backend HTTP API. The sandbox's outbound proxy has a
+# per-sandbox allow rule for the backend port, added by ensureRepoSandbox.
+#
+# Env vars (injected by sandbox.ts when the claude session starts):
+#   SHIPYARD_BRANCH_ID    — the branch this sandbox belongs to
+#   SHIPYARD_BACKEND_URL  — e.g. http://host.docker.internal:9090
+set -euo pipefail
+
+usage() {
+  cat >&2 <<EOF
+usage: shipyard:sandbox <command> [args]
+
+commands:
+  commit -m <msg> [--amend]   stage all changes and commit on the host
+  commit --amend              amend the previous commit without changing its message
+  push                        push the current branch and update its PR (fills body
+                              from the most recent commit if no --title/stdin body)
+  push --title "TITLE"        set the PR title; if stdin has content it's used as
+                              the PR body. Used when opening a NEW PR so the body
+                              follows the repo's .github/pull_request_template.md.
+  push --dry-run              verify the flow without running git push or gh pr
+                              create/edit. Backend echoes what it would send.
+EOF
+  exit 2
+}
+
+cmd="${1:-}"
+shift || true
+[ -z "$cmd" ] && usage
+
+BACKEND="${SHIPYARD_BACKEND_URL:-http://host.docker.internal:9090}"
+BRANCH="${SHIPYARD_BRANCH_ID:-}"
+if [ -z "$BRANCH" ]; then
+  echo "error: SHIPYARD_BRANCH_ID not set in sandbox env" >&2
+  exit 1
+fi
+
+case "$cmd" in
+  commit)
+    message=""
+    amend=0
+    has_m=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -m)
+          [ $# -lt 2 ] && { echo "error: -m requires an argument" >&2; exit 2; }
+          message="$2"
+          has_m=1
+          shift 2
+          ;;
+        --amend)
+          amend=1
+          shift
+          ;;
+        *)
+          echo "error: unknown arg: $1" >&2
+          usage
+          ;;
+      esac
+    done
+    if [ $amend -eq 0 ] && [ $has_m -eq 0 ]; then
+      echo "error: -m <message> required (or use --amend)" >&2
+      exit 2
+    fi
+    url="$BACKEND/api/branches/$BRANCH/commit"
+    [ $amend -eq 1 ] && url="$url?amend=1"
+    # printf '%s' preserves embedded newlines and % verbatim; --data-binary
+    # @- streams the message body from stdin so we don't have to escape.
+    printf '%s' "$message" | curl -sS --fail-with-body -X POST \
+      -H "Content-Type: text/plain" --data-binary @- "$url"
+    ;;
+  push)
+    title=""
+    dryrun=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --title)
+          [ $# -lt 2 ] && { echo "error: --title requires an argument" >&2; exit 2; }
+          title="$2"; shift 2 ;;
+        --dry-run)
+          dryrun=1; shift ;;
+        *)
+          echo "error: unknown arg: $1" >&2; usage ;;
+      esac
+    done
+
+    url="$BACKEND/api/branches/$BRANCH/push"
+    # Dry-run: backend echoes what it would do (title/body included) and
+    # skips the real git push + gh pr create/edit. Triggered either
+    # per-invocation via --dry-run or persistently via SHIPYARD_PUSH_DRYRUN=1.
+    if [ $dryrun -eq 1 ] || [ "${SHIPYARD_PUSH_DRYRUN:-}" = "1" ]; then
+      url="$url?dryRun=1"
+    fi
+
+    # Read PR body from stdin iff stdin is a pipe/file (not a terminal).
+    # Claude's Bash tool always invokes us with a non-TTY stdin, so an
+    # empty pipe gives us an empty body immediately.
+    body=""
+    if [ ! -t 0 ]; then
+      body=$(cat)
+    fi
+
+    if [ -n "$body" ] || [ -n "$title" ]; then
+      # Send title as header, body as text/plain. Either may be empty;
+      # backend uses `gh pr create --title/--body` iff both are provided,
+      # otherwise falls back to --fill.
+      args=(-sS --fail-with-body -X POST -H "Content-Type: text/plain" --data-binary @-)
+      [ -n "$title" ] && args+=(-H "X-Shipyard-Title: $title")
+      printf '%s' "$body" | curl "${args[@]}" "$url"
+    else
+      # No title, no body — plain POST. Skip Content-Type so Fastify's
+      # JSON parser doesn't reject an empty body.
+      exec curl -sS --fail-with-body -X POST "$url"
+    fi
+    ;;
+  *)
+    usage
+    ;;
+esac

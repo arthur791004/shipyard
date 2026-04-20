@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Alert,
+  Box,
   Button,
   Code,
   Dialog,
@@ -9,20 +10,23 @@ import {
   Input,
   Portal,
   Stack,
+  Switch,
   Text,
 } from "@chakra-ui/react";
-import { api, Repo } from "./api";
+import { api, Repo, Settings } from "./api";
 
 interface Props {
   open: boolean;
   activeRepo: Repo | null;
   firstRun: boolean;
+  settings: Settings | null;
   onClose: () => void;
   onAddRepo: () => Promise<void> | void;
   onSaved: (r: Repo) => void;
+  onSettingsSaved: (s: Settings) => void;
 }
 
-export function SettingsModal({ open, activeRepo, firstRun, onClose, onAddRepo, onSaved }: Props) {
+export function SettingsModal({ open, activeRepo, firstRun, settings, onClose, onAddRepo, onSaved, onSettingsSaved }: Props) {
   const [installCmd, setInstallCmd] = useState<string>(activeRepo?.dashboardInstallCmd ?? "");
   const [startCmd, setStartCmd] = useState<string>(activeRepo?.dashboardStartCmd ?? "");
   const [previewUrl, setPreviewUrl] = useState<string>(activeRepo?.previewUrl ?? "");
@@ -151,6 +155,39 @@ export function SettingsModal({ open, activeRepo, firstRun, onClose, onAddRepo, 
                     </Field.Root>
                   </>
                 )}
+                <Box borderTopWidth={1} borderColor="gray.800" pt={4}>
+                  <Text fontSize="xs" color="gray.400" textTransform="uppercase" mb={3}>
+                    Development
+                  </Text>
+                  <HStack justify="space-between" align="start">
+                    <Stack gap={0} flex={1} pr={4}>
+                      <Text fontSize="sm">Dry-run push mode</Text>
+                      <Text fontSize="xs" color="gray.500">
+                        When on, every <Code>shipyard:sandbox push</Code> from the sandbox is
+                        silently routed through dry-run. Claude builds, commits, and "pushes"
+                        as normal — nothing lands on origin or creates a real PR. Perfect for
+                        testing the end-to-end flow.
+                      </Text>
+                    </Stack>
+                    <Switch.Root
+                      size="md"
+                      checked={settings?.pushDryRun === true}
+                      onCheckedChange={async (e) => {
+                        try {
+                          const next = await api.saveSettings({ pushDryRun: e.checked });
+                          onSettingsSaved(next);
+                        } catch (err: any) {
+                          setErr(err?.message ?? "Failed to save dry-run mode");
+                        }
+                      }}
+                    >
+                      <Switch.HiddenInput />
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Root>
+                  </HStack>
+                </Box>
                 {err && (
                   <Alert.Root status="error">
                     <Alert.Indicator />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { MutableRefObject, useEffect, useRef, useState } from "react";
 import { Box, Button, Flex, HStack, Heading, Portal, Tabs, Text, Tooltip } from "@chakra-ui/react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
@@ -10,39 +10,45 @@ export type TerminalKind = "claude" | "shell" | "logs";
 interface Props {
   branch: Branch;
   kind: TerminalKind;
-  fullscreen: boolean;
   isMobile?: boolean;
-  onFullscreenToggle: () => void;
+  previewPending?: boolean;
   onKindChange: (kind: TerminalKind) => void;
   onClose: () => void;
   onPreview: (b: Branch) => void;
+  onPreviewInline?: (b: Branch) => void;
   onOpenEditor: (b: Branch) => void;
   onRefresh: (b: Branch) => void;
   onHardRefresh: (b: Branch) => void;
-  onPush: (b: Branch) => void;
+  onToggleSidebar?: () => void;
+  sidebarCollapsed?: boolean;
+  writeRef?: MutableRefObject<((data: string) => void) | null>;
 }
 
 export function TerminalModal({
   branch,
   kind,
-  fullscreen,
   isMobile,
-  onFullscreenToggle,
+  previewPending,
   onKindChange,
   onClose,
   onPreview,
+  onPreviewInline,
   onOpenEditor,
   onRefresh,
   onHardRefresh,
-  onPush,
+  onToggleSidebar,
+  sidebarCollapsed,
+  writeRef,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalDisabled = !branch.isTrunk && branch.status !== "running";
   const [reloadMenu, setReloadMenu] = useState<{ x: number; y: number } | null>(null);
+  const [previewMenu, setPreviewMenu] = useState(false);
 
   useEffect(() => {
-    if (!reloadMenu) return;
-    const close = () => setReloadMenu(null);
+    const open = reloadMenu || previewMenu;
+    if (!open) return;
+    const close = () => { setReloadMenu(null); setPreviewMenu(false); };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", onKey);
@@ -50,7 +56,7 @@ export function TerminalModal({
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", onKey);
     };
-  }, [reloadMenu]);
+  }, [reloadMenu, previewMenu]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -84,8 +90,15 @@ export function TerminalModal({
     const refocus = () => term.focus();
     container.addEventListener("mousedown", refocus);
 
+    // `disposed` is hoisted above the callback registrations so every async
+    // entry point (onmessage, onPaste, onResize, ResizeObserver, writeRef)
+    // can early-return after cleanup. Without these guards xterm crashes
+    // with "Cannot read properties of undefined (reading 'dimensions')"
+    // when a queued event fires between term.dispose() and GC.
+    let disposed = false;
+
     const onPaste = (ev: ClipboardEvent) => {
-      if (readOnly) return;
+      if (disposed || readOnly) return;
       // Skip if the paste is targeting a real text input outside the terminal
       // (e.g. the Add Branch name field) — we don't want to steal from those.
       const active = document.activeElement;
@@ -111,15 +124,18 @@ export function TerminalModal({
     const wsUrl = `${wsProto}://${window.location.host}/api/branches/${encodeURIComponent(branch.id)}/terminal?kind=${wsKind}`;
 
     let ws: WebSocket;
-    let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     function connect() {
       ws = new WebSocket(wsUrl);
       ws.onopen = () => {
+        if (disposed) return;
         ws.send(`\x01resize:${term.cols},${term.rows}`);
       };
-      ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : "");
+      ws.onmessage = (e) => {
+        if (disposed) return;
+        term.write(typeof e.data === "string" ? e.data : "");
+      };
       ws.onclose = () => {
         if (disposed) return;
         // Auto-reconnect after 2s — handles PTY not ready yet,
@@ -131,13 +147,23 @@ export function TerminalModal({
     }
     connect();
 
+    // Expose a write function so the chat input can send text to the PTY
+    if (writeRef) {
+      writeRef.current = (data: string) => {
+        if (disposed) return;
+        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+      };
+    }
+
     const disposable = readOnly
       ? { dispose: () => {} }
       : term.onData((d) => {
+          if (disposed) return;
           if (ws.readyState === WebSocket.OPEN) ws.send(d);
         });
 
     const onResize = () => {
+      if (disposed) return;
       try { fit.fit(); } catch {}
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(`\x01resize:${term.cols},${term.rows}`);
@@ -148,15 +174,27 @@ export function TerminalModal({
     ro.observe(containerRef.current);
 
     return () => {
+      // Flip the flag FIRST so any in-flight callback that races the
+      // cleanup early-returns before touching the disposed terminal.
       disposed = true;
+      if (writeRef) writeRef.current = null;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("paste", onPaste, true);
       container.removeEventListener("mousedown", refocus);
       ro.disconnect();
       disposable.dispose();
-      ws.close();
-      term.dispose();
+      // Detach the WS handlers before closing so a late `onmessage` /
+      // `onclose` can't trigger work on the terminal while it's being
+      // disposed. `ws` may be undefined here if the very first connect()
+      // synchronously failed — the optional-chain guards against that.
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.close();
+      }
+      try { term.dispose(); } catch {}
     };
   }, [branch.id, branch.status, kind]);
 
@@ -166,20 +204,20 @@ export function TerminalModal({
         justify="space-between"
         align="center"
         px={4}
-        h="64px"
+        h="48px"
         flexShrink={0}
         gap={4}
         borderBottomWidth={1}
         borderColor="gray.800"
       >
         <HStack gap={3} minW={0} flex="1">
-          {isMobile && (
-            <Button size="sm" variant="ghost" px={2} onClick={onClose} flexShrink={0}>
-              ←
+          {(isMobile || sidebarCollapsed) && onToggleSidebar && (
+            <Button size="sm" variant="ghost" px={1} onClick={onToggleSidebar} flexShrink={0}>
+              <SidebarIcon />
             </Button>
           )}
           <Heading size="sm" truncate flex="0 1 auto" minW={0}>
-            {branch.name}
+            {branch.isTrunk ? "Dashboard" : branch.name}
           </Heading>
           <Tabs.Root
             value={kind}
@@ -187,27 +225,21 @@ export function TerminalModal({
               if (terminalDisabled) return;
               onKindChange(e.value as TerminalKind);
             }}
-            size="sm"
-            variant="plain"
             flexShrink={0}
-            css={{
-              "--tabs-indicator-bg": "colors.gray.subtle",
-              "--tabs-indicator-shadow": "shadows.xs",
-            }}
+            css={{ "--tabs-height": "48px" }}
           >
-            <Tabs.List>
+            <Tabs.List borderBottom="none">
               <Tabs.Trigger value="claude" disabled={terminalDisabled}>Claude</Tabs.Trigger>
               <Tabs.Trigger value="shell" disabled={terminalDisabled}>Terminal</Tabs.Trigger>
               <Tabs.Trigger value="logs" disabled={terminalDisabled}>Logs</Tabs.Trigger>
-              <Tabs.Indicator />
             </Tabs.List>
           </Tabs.Root>
         </HStack>
         <HStack gap={2}>
+          {!branch.isTrunk && (
           <Box
             position="relative"
             onContextMenu={(e) => {
-              if (!branch.sandboxName) return;
               e.preventDefault();
               setReloadMenu({ x: e.clientX, y: e.clientY });
             }}
@@ -215,7 +247,6 @@ export function TerminalModal({
             <IconButton
               label="Reload"
               onClick={(_e) => onRefresh(branch)}
-              disabled={!branch.sandboxName || branch.isTrunk}
             >
               <RefreshIcon />
             </IconButton>
@@ -262,22 +293,66 @@ export function TerminalModal({
               </Portal>
             )}
           </Box>
-          <IconButton
-            label="Preview"
-            onClick={(_e) => onPreview(branch)}
-            disabled={branch.status !== "running"}
-          >
-            <PreviewIcon />
-          </IconButton>
-          {!branch.isTrunk && branch.sandboxName && (
-            <IconButton
-              label="Push & create PR"
-              onClick={(_e) => onPush(branch)}
-              disabled={!branch.worktreePath}
-            >
-              <PushIcon />
-            </IconButton>
           )}
+          <Box
+            position="relative"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setPreviewMenu(true);
+            }}
+          >
+            <IconButton
+              label={previewPending ? "Preview starting…" : "Preview"}
+              onClick={(_e) => onPreview(branch)}
+              disabled={branch.status !== "running"}
+              loading={previewPending}
+            >
+              <PreviewIcon />
+            </IconButton>
+            {previewMenu && (
+                <Box
+                  position="absolute"
+                  right={0}
+                  top="100%"
+                  mt={1}
+                  zIndex={1000}
+                  bg="gray.900"
+                  borderWidth={1}
+                  borderColor="gray.700"
+                  borderRadius="md"
+                  boxShadow="lg"
+                  minW="160px"
+                  py={1}
+                >
+                  <Button
+                    w="100%"
+                    size="sm"
+                    variant="ghost"
+                    justifyContent="flex-start"
+                    borderRadius={0}
+                    _hover={{ bg: "gray.800" }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => { setPreviewMenu(false); onPreview(branch); }}
+                  >
+                    Open in new tab
+                  </Button>
+                  {onPreviewInline && (
+                    <Button
+                      w="100%"
+                      size="sm"
+                      variant="ghost"
+                      justifyContent="flex-start"
+                      borderRadius={0}
+                      _hover={{ bg: "gray.800" }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => { setPreviewMenu(false); onPreviewInline(branch); }}
+                    >
+                      Open in panel
+                    </Button>
+                  )}
+                </Box>
+            )}
+          </Box>
           {!isMobile && (
             <IconButton
               label="Open in editor"
@@ -287,25 +362,12 @@ export function TerminalModal({
               <EditorIcon />
             </IconButton>
           )}
-          {!isMobile && (
-            <IconButton
-              label={fullscreen ? "Exit full screen" : "Full screen"}
-              onClick={(_e) => onFullscreenToggle()}
-            >
-              {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
-            </IconButton>
-          )}
-          {!isMobile && (
-            <IconButton label="Close" onClick={(_e) => onClose()}>
-              <CloseIcon />
-            </IconButton>
-          )}
         </HStack>
       </Flex>
       {!branch.isTrunk && branch.status !== "running" && (
         <Flex
           px={4}
-          py={2}
+          py={4}
           bg={branch.status === "error" ? "red.900" : "gray.900"}
           borderBottomWidth={1}
           borderColor="gray.800"
@@ -334,7 +396,9 @@ export function TerminalModal({
           </Text>
         </Flex>
       )}
-      <Box flex="1" p={2} overflow="hidden" ref={containerRef} css={{ ".xterm": { height: "100%" } }} />
+      {/* Scrollbar overrides + inner content padding live in styles.css
+          (Emotion mangles ::-webkit-scrollbar-* in object syntax). */}
+      <Box flex="1" p={4} overflow="hidden" ref={containerRef} css={{ ".xterm": { height: "100%" } }} />
     </Flex>
   );
 }
@@ -343,11 +407,13 @@ function IconButton({
   label,
   onClick,
   disabled,
+  loading,
   children,
 }: {
   label: string;
   onClick: (e: React.MouseEvent) => void;
   disabled?: boolean;
+  loading?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -359,7 +425,8 @@ function IconButton({
           px={2}
           aria-label={label}
           onClick={onClick}
-          disabled={disabled}
+          disabled={disabled || loading}
+          loading={loading}
         >
           {children}
         </Button>
@@ -373,33 +440,11 @@ function IconButton({
   );
 }
 
-function FullscreenIcon() {
+function SidebarIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 9V4h5" />
-      <path d="M20 9V4h-5" />
-      <path d="M4 15v5h5" />
-      <path d="M20 15v5h-5" />
-    </svg>
-  );
-}
-
-function ExitFullscreenIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9 4v5H4" />
-      <path d="M15 4v5h5" />
-      <path d="M9 20v-5H4" />
-      <path d="M15 20v-5h5" />
-    </svg>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M6 6l12 12" />
-      <path d="M6 18L18 6" />
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
     </svg>
   );
 }
@@ -420,15 +465,6 @@ function PreviewIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
       <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-
-function PushIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M12 19V5" />
-      <path d="M5 12l7-7 7 7" />
     </svg>
   );
 }
